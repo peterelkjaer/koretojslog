@@ -9,6 +9,11 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="stylesheet" href="style.css">
+<script>
+  (function(){var t=localStorage.getItem('theme')||'auto';
+  var d=t==='dark'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme=d?'dark':'light';})();
+</script>
 </head>
 <body>
 <div class="app">
@@ -24,6 +29,7 @@
   <div class="content">
     <header class="top">
       <h1 id="pageTitle">Oversigt</h1>
+      <button class="theme-btn" id="themeBtn" data-act="toggleTheme" aria-label="Skift tema"></button>
       <button class="sync-pill" id="syncPill" data-act="syncPill"></button>
     </header>
     <main id="view"></main>

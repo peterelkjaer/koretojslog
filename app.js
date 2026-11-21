@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -62,6 +62,18 @@ const isWide = () => matchMedia('(min-width: 840px)').matches;
 function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
 function download(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000); }
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Kunne ikke hente ' + src)); document.head.appendChild(s); }); }
+
+/* ---------- Tema ---------- */
+const darkMq = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  const t = localStorage.getItem('theme') || 'auto';
+  const dark = t === 'dark' || (t === 'auto' && darkMq.matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#0d1b2c' : '#1e3a5f');
+  const b = document.getElementById('themeBtn'); if (b) { b.textContent = dark ? '☀️' : '🌙'; b.title = dark ? 'Skift til lyst tema' : 'Skift til mørkt tema'; }
+}
+function setTheme(t) { localStorage.setItem('theme', t); applyTheme(); }
+darkMq.addEventListener('change', applyTheme);
 
 /* ---------- IndexedDB ---------- */
 const DB = (() => {
@@ -193,6 +205,46 @@ function avgKml(vid, from = '0000', to = '9999') {
   const segs = (fuelSegs().byVehicle[vid] || []).filter(s => s.date >= from && s.date <= to);
   const km = segs.reduce((a, s) => a + s.km, 0), l = segs.reduce((a, s) => a + s.liters, 0);
   return l ? { kml: km / l, n: segs.length, km, liters: l } : null;
+}
+/* Ejerskabsøkonomi: købspris + alle udgifter − salgspris (eller anslået værdi) */
+function ownership(v) {
+  if (v.buyPrice == null && v.sellPrice == null) return null;
+  const expenses = live('entries').filter(e => e.vehicleId === v.id).reduce((a, e) => a + (e.cost || 0), 0);
+  const sold = v.sellPrice != null || !!v.sellDate;
+  const endValue = sold ? v.sellPrice : v.estValue;
+  const total = (v.buyPrice || 0) + expenses - (endValue || 0);
+  const end = v.sellDate || today();
+  const months = v.buyDate ? Math.max(1, daysBetween(v.buyDate, end) / 30.44) : null;
+  const pts = kmPoints(v.id);
+  const kmStart = v.buyKm ?? (pts.length ? Math.min(...pts.map(p => p.km)) : null);
+  const kmEnd = v.sellKm ?? currentKm(v.id);
+  const km = kmStart != null && kmEnd != null && kmEnd > kmStart ? kmEnd - kmStart : null;
+  return { expenses, sold, endValue, total, months, km, hasEnd: endValue != null };
+}
+function fmtDuration(months) {
+  const y = Math.floor(months / 12), mo = Math.round(months % 12);
+  return [y ? `${y} år` : '', mo ? `${mo} mdr.` : ''].filter(Boolean).join(' ') || 'under 1 md.';
+}
+function economyCard(v) {
+  const o = ownership(v);
+  if (!o) return `<div class="card" style="margin-top:14px"><div class="row between"><h3>💰 Økonomi</h3><button class="btn sm" data-act="editVehicle" data-id="${v.id}">Angiv købspris</button></div>
+    <p class="muted small" style="margin:6px 0 0">Indtast købspris og evt. salgspris eller anslået værdi, så kan du se, hvad køretøjet reelt har kostet dig.</p></div>`;
+  const label = o.sold ? 'Samlet pris for ejerskabet' : (o.hasEnd ? 'Reel pris indtil nu' : 'Brugt indtil nu');
+  return `<div class="card" style="margin-top:14px"><div class="row between"><h3>💰 Økonomi</h3>${o.sold ? '<span class="badge b-unknown">Solgt</span>' : ''}</div>
+    <table class="money" style="margin-top:6px">
+      <tr><td>Købspris${v.buyDate ? ` <span class="muted small">(${fmtDate(v.buyDate)})</span>` : ''}</td><td class="n">${fmtKr2(v.buyPrice || 0)}</td></tr>
+      <tr><td>+ Udgifter i alt</td><td class="n">${fmtKr2(o.expenses)}</td></tr>
+      ${o.hasEnd ? `<tr><td>− ${o.sold ? 'Salgspris' : 'Anslået værdi i dag'}${o.sold && v.sellDate ? ` <span class="muted small">(${fmtDate(v.sellDate)})</span>` : ''}</td><td class="n">${fmtKr2(o.endValue)}</td></tr>` : ''}
+      <tr class="sum"><td>= ${label}</td><td class="n">${fmtKr2(o.total)}</td></tr>
+    </table>
+    <div class="kpis" style="margin-top:12px">
+      ${o.months ? `<div class="kpi"><div class="l">${o.sold ? 'Ejet i' : 'Ejet indtil nu'}</div><div class="v" style="font-size:1.05rem">${fmtDuration(o.months)}</div></div>
+      <div class="kpi"><div class="l">Pr. måned</div><div class="v">${fmtKr(o.total / o.months)}</div></div>` : ''}
+      ${o.km ? `<div class="kpi"><div class="l">Kørt i ejertiden</div><div class="v" style="font-size:1.05rem">${fmtKm(o.km)}</div></div>
+      <div class="kpi"><div class="l">Pr. km</div><div class="v">${fmtKr2(o.total / o.km)}</div></div>` : ''}
+    </div>
+    ${!o.hasEnd ? '<p class="muted small" style="margin:10px 0 0">Tip: Angiv en anslået værdi i dag (Rediger ✏️), så tæller værditabet med i stedet for hele købsprisen.</p>' : ''}
+    ${!v.buyDate ? '<p class="muted small" style="margin:6px 0 0">Angiv købsdato for at se pris pr. måned.</p>' : ''}</div>`;
 }
 const vehicleName = id => byId('vehicles', id)?.name || '(slettet)';
 const entryTitle = e => e.title || TYPES[e.type]?.label || 'Post';
@@ -504,6 +556,14 @@ function vehicleForm(id) {
       <div class="f"><label>Drivmiddel</label><select name="fuel">${FUELS.map(f => `<option ${f === v.fuel ? 'selected' : ''}>${f}</option>`).join('')}</select></div>
       ${id ? '' : `<div class="f full"><label>Nuværende kilometerstand</label><input name="km" type="number" inputmode="numeric" placeholder="F.eks. 142500"></div>`}
       <div class="f full"><label>Noter (dækstørrelse, olietype, osv.)</label><textarea name="notes">${esc(v.notes)}</textarea></div>
+      <div class="f full"><h3 style="margin-top:6px">💰 Køb og salg <span class="muted small" style="font-weight:400">(valgfrit)</span></h3></div>
+      <div class="f"><label>Købsdato</label><input name="buyDate" type="date" value="${esc(v.buyDate)}"></div>
+      <div class="f"><label>Købspris (kr.)</label><input name="buyPrice" type="number" step="any" inputmode="decimal" value="${v.buyPrice ?? ''}"></div>
+      <div class="f"><label>Km ved køb</label><input name="buyKm" type="number" inputmode="numeric" value="${v.buyKm ?? ''}"></div>
+      <div class="f"><label>Anslået værdi i dag (kr.)</label><input name="estValue" type="number" step="any" inputmode="decimal" value="${v.estValue ?? ''}" placeholder="Hvis ikke solgt"></div>
+      <div class="f"><label>Salgsdato</label><input name="sellDate" type="date" value="${esc(v.sellDate)}"></div>
+      <div class="f"><label>Salgspris (kr.)</label><input name="sellPrice" type="number" step="any" inputmode="decimal" value="${v.sellPrice ?? ''}"></div>
+      <div class="f"><label>Km ved salg</label><input name="sellKm" type="number" inputmode="numeric" value="${v.sellKm ?? ''}"></div>
     </div>
     <div class="modal-actions">${id ? '<button type="button" class="btn danger" data-del>Slet</button><span class="spacer"></span>' : ''}
       <button type="button" class="btn" data-close>Annuller</button><button class="btn primary">Gem</button></div></form>`);
@@ -511,6 +571,8 @@ function vehicleForm(id) {
     e.preventDefault(); const fd = new FormData(e.target);
     for (const k of ['name', 'make', 'model', 'plate', 'vin', 'fuel', 'notes']) v[k] = (fd.get(k) || '').trim();
     v.plate = v.plate.toUpperCase(); v.year = num(fd.get('year'));
+    for (const k of ['buyPrice', 'buyKm', 'estValue', 'sellPrice', 'sellKm']) v[k] = num(fd.get(k));
+    v.buyDate = fd.get('buyDate') || null; v.sellDate = fd.get('sellDate') || null;
     if (!v.createdAt) v.createdAt = nowIso();
     upsert('vehicles', v);
     const km = num(fd.get('km'));
@@ -793,7 +855,7 @@ function renderHome() {
 function vehicleCard(v, y) {
   const top = sortedReminders(v.id)[0]; const km = currentKm(v.id); const lk = lastKmDate(v.id);
   return `<div class="card click" data-act="goVehicle" data-id="${v.id}">
-    <div class="row between"><h3>${esc(v.name)}</h3>${v.plate ? `<span class="badge b-unknown">${esc(v.plate)}</span>` : ''}</div>
+    <div class="row between"><h3>${esc(v.name)}</h3><span>${v.sellDate || v.sellPrice != null ? '<span class="badge b-soon">Solgt</span> ' : ''}${v.plate ? `<span class="badge b-unknown">${esc(v.plate)}</span>` : ''}</span></div>
     <div class="muted small">${esc([v.make, v.model, v.year].filter(Boolean).join(' '))}</div>
     <div class="row between" style="margin-top:8px"><span class="big-km">${fmtKm(km)}</span><span class="muted small">${lk ? 'pr. ' + fmtDate(lk) : ''}</span></div>
     ${top ? `<div class="small" style="margin-top:6px"><span class="badge b-${top.s.level}">${esc(top.r.name)}</span> <span class="muted">${remText(top.s).split(' · ')[0] || ''}</span></div>` : ''}
@@ -840,6 +902,7 @@ function renderVehicle(id) {
       ${v.notes ? `<p class="small" style="margin:10px 0 0;white-space:pre-wrap">${esc(v.notes)}</p>` : ''}
       ${v.vin ? `<p class="muted small" style="margin:6px 0 0">VIN: ${esc(v.vin)}</p>` : ''}
     </div>
+    ${economyCard(v)}
     <div class="${wide ? 'two-col' : ''}"><div>
       <div class="tabs">${tabs.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-act="tab" data-id="${id}" data-tab="${k}">${l}</button>`).join('')}</div>
       <div id="vpanel">${panel[tab]}</div>
@@ -1063,6 +1126,10 @@ function renderSettings() {
         <button class="btn danger" data-act="disconnect">Afbryd</button></div>`
       : `<button class="btn primary" data-act="connect">Forbind Google Drive</button>`}
     </div>
+    <div class="card" style="margin-top:14px"><h3>🎨 Tema</h3>
+      <div class="chips" style="margin-top:8px">${[['auto', '⚙️ Følg enheden'], ['light', '☀️ Lyst'], ['dark', '🌙 Mørkt']].map(([k, l]) =>
+        `<button class="chip ${(localStorage.getItem('theme') || 'auto') === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div>
+      <p class="muted small" style="margin:8px 0 0">Gælder for denne enhed. Du kan også skifte hurtigt med ☀️/🌙-knappen øverst.</p></div>
     <div class="card" style="margin-top:14px"><h3>💾 Backup</h3>
       <p class="muted small">Eksportér alle registreringer som en JSON-fil (uden bilag), eller importér en tidligere backup. Import fletter med eksisterende data.</p>
       <div class="row"><button class="btn" data-act="exportJson">⤓ Eksportér data</button><label class="btn">⤒ Importér<input type="file" accept="application/json,.json" hidden id="imp"></label></div>
@@ -1099,6 +1166,8 @@ const ACT = {
   rCat: d => { rf.cats.has(d.id) ? rf.cats.delete(d.id) : rf.cats.add(d.id); render(); },
   rCatAll: () => { rf.cats = rf.cats.size === Object.keys(TYPES).length ? new Set() : new Set(Object.keys(TYPES)); render(); },
   exportCsv: () => exportCsv(),
+  theme: d => { setTheme(d.id); render(); },
+  toggleTheme: () => { setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); if (currentRoute().name === 'settings') render(); },
   print: () => window.print(),
   connect: () => connectDrive(),
   syncNow: () => Drive.hasToken() ? Sync.run().then(render) : connectDrive(),
@@ -1116,6 +1185,7 @@ document.addEventListener('click', e => {
 
 /* ---------- Opstart ---------- */
 async function start() {
+  applyTheme();
   try { const d = await DB.get('kv', 'data'); if (d) data = merge(emptyData(), d); } catch (e) { console.error(e); toast('Kunne ikke læse lokale data'); }
   window.addEventListener('hashchange', render);
   matchMedia('(min-width: 840px)').addEventListener('change', render);
