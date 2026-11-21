@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -56,6 +56,7 @@ const fmtNum = n => (n ?? 0).toLocaleString('da-DK', { maximumFractionDigits: 0 
 const fmtKm = n => n == null ? '–' : fmtNum(n) + ' km';
 const fmtDate = s => s ? parseD(s).toLocaleDateString('da-DK', { day: 'numeric', month: 'short', year: 'numeric' }) : '–';
 const fmtMonth = s => parseD(s).toLocaleDateString('da-DK', { month: 'long', year: 'numeric' });
+const fmtDec = (n, d = 1) => n.toLocaleString('da-DK', { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmtSize = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' kB';
 const isWide = () => matchMedia('(min-width: 840px)').matches;
 function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
@@ -165,6 +166,33 @@ function remText(s) {
   if (s.predDate && s.kmLeft > 0) parts.push(`ca. ${fmtMonth(s.predDate)} ved nuv. kørsel`);
   if (s.level === 'unknown') parts.push('Angiv hvornår det sidst blev udført');
   return parts.join(' · ');
+}
+/* Brændstofforbrug: fuld tank til fuld tank. Delvise tankninger lægges til næste fulde. */
+let segCache = null;
+function fuelSegs() {
+  if (segCache) return segCache;
+  segCache = { byEntry: {}, byVehicle: {} };
+  for (const v of live('vehicles')) {
+    const fs = live('entries').filter(e => e.vehicleId === v.id && e.type === 'fuel' && e.km != null && e.liters > 0)
+      .sort((a, b) => a.km - b.km || a.date.localeCompare(b.date));
+    const segs = []; let lastKm = null, acc = 0;
+    for (const e of fs) {
+      const full = e.fullTank !== false;
+      if (lastKm != null) {
+        acc += e.liters;
+        if (full) { const d = e.km - lastKm; if (d > 0) { const s = { entryId: e.id, date: e.date, km: d, liters: acc, kml: d / acc, cost: e.cost }; segs.push(s); segCache.byEntry[e.id] = s; } acc = 0; lastKm = e.km; }
+      } else if (full) { lastKm = e.km; acc = 0; }
+    }
+    segCache.byVehicle[v.id] = segs;
+  }
+  return segCache;
+}
+const fuelUnit = vid => byId('vehicles', vid)?.fuel === 'El' ? 'km/kWh' : 'km/l';
+const volUnit = vid => byId('vehicles', vid)?.fuel === 'El' ? 'kWh' : 'l';
+function avgKml(vid, from = '0000', to = '9999') {
+  const segs = (fuelSegs().byVehicle[vid] || []).filter(s => s.date >= from && s.date <= to);
+  const km = segs.reduce((a, s) => a + s.km, 0), l = segs.reduce((a, s) => a + s.liters, 0);
+  return l ? { kml: km / l, n: segs.length, km, liters: l } : null;
 }
 const vehicleName = id => byId('vehicles', id)?.name || '(slettet)';
 const entryTitle = e => e.title || TYPES[e.type]?.label || 'Post';
@@ -514,6 +542,8 @@ function entryForm(id, preset = {}) {
       <div class="f"><label>Kilometerstand</label><input name="km" type="number" inputmode="numeric" value="${e.km ?? ''}" placeholder=""></div>
       <div class="f"><label>Beløb (kr.)</label><input name="cost" type="number" step="any" inputmode="decimal" value="${e.cost ?? ''}"></div>
       <div class="f fuelonly"><label>Liter / kWh</label><input name="liters" type="number" step="any" inputmode="decimal" value="${e.liters ?? ''}"></div>
+      <div class="f full fuelonly"><label class="check" style="font-weight:400;color:var(--fg)"><input type="checkbox" name="fullTank" ${e.fullTank !== false ? 'checked' : ''}> Fuld tank (bruges til at beregne forbrug)</label>
+        <span class="muted small priceHint"></span></div>
       <div class="f notfuel"><label>Værksted / sted</label><input name="workshop" value="${esc(e.workshop)}"></div>
       <div class="f full"><label>Noter</label><textarea name="notes">${esc(e.notes)}</textarea></div>
       <div class="f full rems"></div>
@@ -542,6 +572,9 @@ function entryForm(id, preset = {}) {
     $('.fl', m).innerHTML = list.length ? fileChips(list, true) : '<span class="muted small">Ingen bilag endnu</span>';
   };
   form.vehicleId.onchange = refresh; form.type.onchange = refresh;
+  const priceHint = () => { const c = num(form.cost.value), l = num(form.liters.value);
+    $('.priceHint', m).textContent = c && l ? `= ${fmtDec(c / l, 2)} kr. pr. ${volUnit(form.vehicleId.value)}` : 'Husk kilometerstand og liter ved hver tankning.'; };
+  form.cost.oninput = priceHint; form.liters.oninput = priceHint; priceHint();
   $$('.rems', m)[0].addEventListener('change', ev => { if (ev.target.name === 'rem') e.reminderIds = $$('input[name=rem]:checked', m).map(x => x.value); });
   $$('[data-pick]', m).forEach(inp => inp.onchange = async () => {
     for (const file of inp.files) { const f = await compressImage(file); pending.push({ id: 'p' + uid(), name: f.name, mime: f.type, size: f.size, _file: f }); }
@@ -559,7 +592,7 @@ function entryForm(id, preset = {}) {
   form.onsubmit = async ev => {
     ev.preventDefault(); const fd = new FormData(form);
     e.vehicleId = fd.get('vehicleId'); e.type = fd.get('type'); e.title = fd.get('title').trim(); e.date = fd.get('date');
-    e.km = num(fd.get('km')); e.cost = num(fd.get('cost')); e.liters = e.type === 'fuel' ? num(fd.get('liters')) : null;
+    e.km = num(fd.get('km')); e.cost = num(fd.get('cost')); e.liters = e.type === 'fuel' ? num(fd.get('liters')) : null; e.fullTank = e.type === 'fuel' ? fd.get('fullTank') === 'on' : undefined;
     e.workshop = (fd.get('workshop') || '').trim(); e.notes = fd.get('notes').trim();
     e.reminderIds = e.type === 'fuel' ? [] : fd.getAll('rem');
     const cur = currentKm(e.vehicleId);
@@ -590,12 +623,21 @@ function entryView(id) {
       <div class="kpi"><div class="l">Beløb</div><div class="v" style="font-size:1.05rem">${e.cost != null ? fmtKr2(e.cost) : '–'}</div></div>
       ${e.liters ? `<div class="kpi"><div class="l">Liter/kWh</div><div class="v" style="font-size:1.05rem">${e.liters.toLocaleString('da-DK')}</div></div>` : ''}
     </div>
+    ${e.type === 'fuel' ? (() => { const s = fuelSegs().byEntry[e.id]; const parts = [];
+      if (s) parts.push(`<b>${fmtDec(s.kml)} ${fuelUnit(e.vehicleId)}</b> (${fmtKm(s.km)} siden sidste fulde tank)`);
+      if (e.cost && e.liters) parts.push(`${fmtDec(e.cost / e.liters, 2)} kr. pr. ${volUnit(e.vehicleId)}`);
+      if (e.fullTank === false) parts.push('Delvis tankning');
+      return parts.length ? `<p><span class="lbl">Forbrug</span><br>${parts.join(' · ')}</p>` : ''; })() : ''}
     ${e.workshop ? `<p><span class="lbl">Værksted / sted</span><br>${esc(e.workshop)}</p>` : ''}
     ${rems.length ? `<p><span class="lbl">Udført vedligehold</span><br>${rems.map(esc).join(', ')}</p>` : ''}
     ${e.notes ? `<p><span class="lbl">Noter</span><br>${esc(e.notes).replace(/\n/g, '<br>')}</p>` : ''}
     <p class="lbl">Bilag</p>${fileChips(filesOf('entry', id), false) || '<span class="muted small">Ingen bilag</span>'}
-    <div class="modal-actions"><button class="btn" data-close>Luk</button><button class="btn primary" data-edit>Rediger</button></div>`);
+    <div class="modal-actions"><button class="btn danger" data-del>🗑 Slet</button><span class="spacer"></span><button class="btn" data-close>Luk</button><button class="btn primary" data-edit>✏️ Rediger</button></div>`);
   $('[data-edit]', m).onclick = async () => { await closeLayer(); entryForm(id); };
+  $('[data-del]', m).onclick = async () => {
+    if (!confirm(`Slet "${entryTitle(e)}" fra ${fmtDate(e.date)}${filesOf('entry', id).length ? ' og dens bilag' : ''}?`)) return;
+    softDelete('entries', id); deleteFilesOf('entry', id); await persist(); await closeLayer(); render(); toast('Slettet');
+  };
 }
 
 function readingForm(vid, rid) {
@@ -693,6 +735,7 @@ function setTitle(t, nav) {
   $$('[data-nav]').forEach(a => a.classList.toggle('active', a.dataset.nav === nav));
 }
 function render() {
+  segCache = null;
   const r = currentRoute();
   const keepScroll = window.scrollY;
   if (r.name === 'vehicle') renderVehicle(r.vid);
@@ -759,7 +802,7 @@ function entryItem(e, showVehicle) {
   const t = TYPES[e.type] || TYPES.other; const nf = filesOf('entry', e.id).length;
   return `<div class="item" data-act="viewEntry" data-id="${e.id}"><div class="ic">${t.icon}</div>
     <div class="body"><div class="t">${esc(entryTitle(e))}</div>
-    <div class="s">${fmtDate(e.date)}${e.km != null ? ' · ' + fmtKm(e.km) : ''}${showVehicle ? ' · ' + esc(vehicleName(e.vehicleId)) : ''}${e.workshop ? ' · ' + esc(e.workshop) : ''}${nf ? ` · 📎${nf}` : ''}</div></div>
+    <div class="s">${fmtDate(e.date)}${e.km != null ? ' · ' + fmtKm(e.km) : ''}${showVehicle ? ' · ' + esc(vehicleName(e.vehicleId)) : ''}${e.workshop ? ' · ' + esc(e.workshop) : ''}${fuelSegs().byEntry[e.id] ? ` · <b>${fmtDec(fuelSegs().byEntry[e.id].kml)} ${fuelUnit(e.vehicleId)}</b>` : ''}${nf ? ` · 📎${nf}` : ''}</div></div>
     <div class="amt">${e.cost != null ? fmtKr(e.cost) : ''}</div></div>`;
 }
 
@@ -789,7 +832,9 @@ function renderVehicle(id) {
       <div class="kpis" style="margin-top:12px">
         <div class="kpi"><div class="l">Udgifter i år</div><div class="v">${fmtKr(yearCost(id, y))}</div></div>
         <div class="kpi"><div class="l">Udgifter i alt</div><div class="v">${fmtKr(yearCost(id, ''))}</div></div>
-        <div class="kpi"><div class="l">Registreringer</div><div class="v">${live('entries').filter(e => e.vehicleId === id).length}</div></div>
+        ${(() => { const a = avgKml(id); const segs = fuelSegs().byVehicle[id] || []; const last = segs[segs.length - 1];
+          return a ? `<div class="kpi"><div class="l">Gns. forbrug (${a.n} tankn.)</div><div class="v">${fmtDec(a.kml)} ${fuelUnit(id)}</div>${last ? `<div class="l">Seneste: ${fmtDec(last.kml)} ${fuelUnit(id)}</div>` : ''}</div>`
+            : `<div class="kpi"><div class="l">Registreringer</div><div class="v">${live('entries').filter(e => e.vehicleId === id).length}</div></div>`; })()}
       </div>
       ${v.notes ? `<p class="small" style="margin:10px 0 0;white-space:pre-wrap">${esc(v.notes)}</p>` : ''}
       ${v.vin ? `<p class="muted small" style="margin:6px 0 0">VIN: ${esc(v.vin)}</p>` : ''}
@@ -935,6 +980,8 @@ function renderReports() {
       <div class="kpi"><div class="l">Pr. måned</div><div class="v">${fmtKr(total / months)}</div></div>
       <div class="kpi"><div class="l">Kørt</div><div class="v">${fmtKm(km)}</div></div>
       <div class="kpi"><div class="l">Pr. km</div><div class="v">${km ? fmtKr2(total / km) : '–'}</div></div>
+      ${(() => { let km = 0, l = 0; for (const v of vids) { const a = avgKml(v, from, to); if (a) { km += a.km; l += a.liters; } }
+        return l ? `<div class="kpi"><div class="l">Gns. forbrug</div><div class="v">${fmtDec(km / l)} ${rf.vehicle ? fuelUnit(rf.vehicle) : 'km/l'}</div></div>` : ''; })()}
       <div class="kpi"><div class="l">Registreringer</div><div class="v">${es.length}</div></div>
     </div>
     ${total ? `<div class="two-col" style="margin-top:4px"><div><h2>Udgifter pr. ${byMonth ? 'måned' : 'år'}</h2><div class="card chart">${barChart(buckets, cats)}</div></div>
@@ -949,12 +996,36 @@ function renderReports() {
         <td class="nowrap">${TYPES[e.type]?.icon || ''} ${TYPES[e.type]?.label || ''}</td><td>${esc(entryTitle(e))}${filesOf('entry', e.id).length ? ' 📎' : ''}</td>
         <td class="n">${e.km != null ? fmtNum(e.km) : ''}</td><td class="n">${e.cost != null ? fmtKr2(e.cost) : ''}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">Ingen registreringer i perioden.</td></tr>`}
       ${es.length ? `<tr><td colspan="${rf.vehicle ? 4 : 5}"><b>I alt</b></td><td class="n"><b>${fmtKr2(total)}</b></td></tr>` : ''}</table></div>
-    ${rf.vehicle ? serviceSummary(rf.vehicle) : ''}`;
+    ${rf.vehicle ? fuelTable(rf.vehicle, from, to) + serviceSummary(rf.vehicle) : ''}`;
   $('#rVeh').onchange = e => { rf.vehicle = e.target.value; render(); };
   $('#rPer').onchange = e => { rf.period = e.target.value; render(); };
   $('#rFrom') && ($('#rFrom').onchange = e => { rf.from = e.target.value; render(); });
   $('#rTo') && ($('#rTo').onchange = e => { rf.to = e.target.value; render(); });
   $('#rQ').onchange = e => { rf.q = e.target.value; render(); };
+}
+function fuelTable(vid, from, to) {
+  const segs = (fuelSegs().byVehicle[vid] || []).filter(s => s.date >= from && s.date <= to);
+  if (!segs.length) return '';
+  const u = fuelUnit(vid), vu = volUnit(vid);
+  const pts = segs.map(s => ({ date: s.date, km: s.kml }));
+  return `<h2>Brændstofforbrug</h2><div class="two-col">
+    <div>${segs.length >= 2 ? `<div class="card chart">${kmlChart(pts, u)}</div>` : ''}</div>
+    <div class="card scroll-x"><table class="t"><tr><th>Dato</th><th class="n">Kørt</th><th class="n">${vu === 'l' ? 'Liter' : 'kWh'}</th><th class="n">Pris pr. ${vu}</th><th class="n">${u}</th></tr>
+    ${segs.slice().reverse().map(s => { const e = byId('entries', s.entryId); return `<tr data-act="viewEntry" data-id="${s.entryId}" style="cursor:pointer"><td class="nowrap">${fmtDate(s.date)}</td>
+      <td class="n">${fmtKm(s.km)}</td><td class="n">${fmtDec(s.liters, 2)}</td><td class="n">${e?.cost && e?.liters ? fmtDec(e.cost / e.liters, 2) + ' kr.' : ''}</td><td class="n"><b>${fmtDec(s.kml)}</b></td></tr>`; }).join('')}</table></div></div>`;
+}
+function kmlChart(pts, unit) {
+  const W = 600, H = 180, P = { l: 40, r: 12, t: 12, b: 26 };
+  const t0 = parseD(pts[0].date).getTime(), t1 = Math.max(parseD(pts[pts.length - 1].date).getTime(), t0 + 864e5);
+  const vals = pts.map(p => p.km); const k0 = Math.floor(Math.min(...vals) - 1), k1 = Math.ceil(Math.max(...vals) + 1);
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const x = d => P.l + (parseD(d).getTime() - t0) / (t1 - t0) * (W - P.l - P.r);
+  const yy = k => H - P.b - (k - k0) / (k1 - k0) * (H - P.t - P.b);
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Forbrug over tid">
+    ${[k0, (k0 + k1) / 2, k1].map(k => `<line x1="${P.l}" x2="${W - P.r}" y1="${yy(k)}" y2="${yy(k)}" stroke="currentColor" opacity=".1"/><text x="${P.l - 6}" y="${yy(k) + 4}" text-anchor="end">${fmtDec(k, 0)}</text>`).join('')}
+    <path d="${pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${yy(p.km).toFixed(1)}`).join('')}" fill="none" stroke="#ea580c" stroke-width="2.5"/>
+    ${pts.map(p => `<circle cx="${x(p.date)}" cy="${yy(p.km)}" r="3" fill="#ea580c"><title>${fmtDate(p.date)}: ${fmtDec(p.km)} ${unit}</title></circle>`).join('')}
+    <text x="${P.l}" y="${H - 6}">${fmtDate(pts[0].date)}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end">${fmtDate(pts[pts.length - 1].date)}</text></svg>`;
 }
 function serviceSummary(vid) {
   const rs = sortedReminders(vid); if (!rs.length) return '';
@@ -968,9 +1039,9 @@ function exportCsv() {
   const es = reportEntries();
   const cell = v => { const s = String(v ?? ''); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   const dec = n => n == null ? '' : String(n).replace('.', ',');
-  const rows = [['Dato', 'Køretøj', 'Kategori', 'Beskrivelse', 'Kilometer', 'Beløb (kr)', 'Liter/kWh', 'Værksted/sted', 'Udført vedligehold', 'Noter', 'Antal bilag']];
+  const rows = [['Dato', 'Køretøj', 'Kategori', 'Beskrivelse', 'Kilometer', 'Beløb (kr)', 'Liter/kWh', 'Værksted/sted', 'Udført vedligehold', 'Noter', 'Antal bilag', 'Forbrug km/l']];
   for (const e of es) rows.push([e.date, vehicleName(e.vehicleId), TYPES[e.type]?.label, entryTitle(e), e.km ?? '', dec(e.cost), dec(e.liters), e.workshop,
-    (e.reminderIds || []).map(r => byId('reminders', r)?.name).filter(Boolean).join(', '), e.notes, filesOf('entry', e.id).length]);
+    (e.reminderIds || []).map(r => byId('reminders', r)?.name).filter(Boolean).join(', '), e.notes, filesOf('entry', e.id).length, fuelSegs().byEntry[e.id] ? dec(Math.round(fuelSegs().byEntry[e.id].kml * 10) / 10) : '']);
   const csv = '﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n');
   download(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `koretojslog-${today()}.csv`);
 }
