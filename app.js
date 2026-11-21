@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -712,13 +712,14 @@ function docForm(vid) {
 function quickAdd() {
   const vid = currentRoute().vid;
   const m = modal('Ny registrering', `<div class="quick">
+    <button data-q="fuel"><span>⛽</span><div><b>Optankning</b><div class="muted small">Kilometerstand, liter og beløb – giver km/l</div></div></button>
     <button data-q="entry"><span>🧾</span><div><b>Udgift / service</b><div class="muted small">Værksted, reservedele, forsikring, brændstof …</div></div></button>
     <button data-q="km"><span>🔢</span><div><b>Kilometerstand</b><div class="muted small">Hold styr på kørsel og kommende service</div></div></button>
     <button data-q="vehicle"><span>🚗</span><div><b>Nyt køretøj</b><div class="muted small">Bil, motorcykel, trailer, traktor …</div></div></button>
   </div>`);
   $$('[data-q]', m).forEach(b => b.onclick = async () => {
     await closeLayer();
-    ({ entry: () => entryForm(null, { vehicleId: vid }), km: () => readingForm(vid), vehicle: () => vehicleForm() })[b.dataset.q]();
+    ({ fuel: () => entryForm(null, { vehicleId: vid, type: 'fuel' }), entry: () => entryForm(null, { vehicleId: vid }), km: () => readingForm(vid), vehicle: () => vehicleForm() })[b.dataset.q]();
   });
 }
 
