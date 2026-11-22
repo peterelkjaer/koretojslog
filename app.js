@@ -1,7 +1,11 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
+/* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
+const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+const NativePl = name => (IS_NATIVE ? window.Capacitor.registerPlugin(name) : null);
+const NH = NativePl('NativeHelper'), NFs = NativePl('Filesystem'), NShare = NativePl('Share'), NBars = NativePl('SystemBars');
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -60,7 +64,19 @@ const fmtDec = (n, d = 1) => n.toLocaleString('da-DK', { minimumFractionDigits: 
 const fmtSize = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' kB';
 const isWide = () => matchMedia('(min-width: 840px)').matches;
 function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
-function download(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000); }
+const blobToBase64 = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
+async function download(blob, name) {
+  if (IS_NATIVE) { // Gem i appens midlertidige mappe og åbn Androids "Del"-menu (gem i Filer, Drive, mail, PDF-læser …)
+    try {
+      const safe = name.replace(/[\\/:*?"<>|]/g, '_');
+      const { uri } = await NFs.writeFile({ path: safe, data: await blobToBase64(blob), directory: 'CACHE' });
+      await NShare.share({ title: safe, files: [uri], dialogTitle: 'Gem eller del' });
+    } catch (e) { if (!/cancel/i.test(e.message || '')) toast('Kunne ikke dele filen: ' + e.message, 4000); }
+    return;
+  }
+  downloadWeb(blob, name);
+}
+function downloadWeb(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000); }
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Kunne ikke hente ' + src)); document.head.appendChild(s); }); }
 
 /* ---------- Tema ---------- */
@@ -70,6 +86,8 @@ function applyTheme() {
   const dark = t === 'dark' || (t === 'auto' && darkMq.matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#0d1b2c' : '#1e3a5f');
+  if (NBars) { NBars.setStyle({ style: dark ? 'DARK' : 'LIGHT', bar: 'StatusBar' }).catch(() => {});
+    NBars.setStyle({ style: 'DARK', bar: 'NavigationBar' }).catch(() => {}); }
   const b = document.getElementById('themeBtn'); if (b) { b.textContent = dark ? '☀️' : '🌙'; b.title = dark ? 'Skift til lyst tema' : 'Skift til mørkt tema'; }
 }
 function setTheme(t) { localStorage.setItem('theme', t); applyTheme(); }
@@ -259,7 +277,18 @@ const Drive = {
   clientId() { return (localStorage.getItem('clientId') || (window.APP_CONFIG || {}).GOOGLE_CLIENT_ID || '').trim(); },
   enabled() { return localStorage.getItem('mode') === 'drive'; },
   async loadGis() { if (!(window.google && google.accounts && google.accounts.oauth2)) await loadScript('https://accounts.google.com/gsi/client'); },
-  async login() {
+  async login(interactive = true) {
+    if (IS_NATIVE) {
+      try {
+        const r = await NH.authorize({ scopes: [SCOPE], interactive });
+        this.token = r.accessToken; this.exp = Date.now() + 50 * 60 * 1000; // Google-tokens gælder ca. 1 time
+        localStorage.setItem('tok', JSON.stringify({ t: this.token, e: this.exp }));
+        return;
+      } catch (e) {
+        if (!interactive) throw new NeedAuth();
+        throw new Error(e.code === 'CANCELLED' ? 'Login blev afbrudt' : (e.message || 'Login fejlede'));
+      }
+    }
     if (!this.clientId()) throw new Error('Indsæt først dit Google Client ID under Indstillinger.');
     await this.loadGis();
     return new Promise((res, rej) => {
@@ -286,10 +315,18 @@ const Drive = {
     if (this.token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(this.token, () => {});
     this.token = null; localStorage.removeItem('tok'); localStorage.removeItem('consented');
   },
-  async api(url, opts = {}) {
-    if (!this.hasToken()) throw new NeedAuth();
+  // Sørger for et gyldigt token. I Android-appen fornyes det lydløst uden at spørge brugeren.
+  async ensureToken() {
+    if (this.hasToken()) return;
+    if (IS_NATIVE && localStorage.getItem('mode') === 'drive') return this.login(false);
+    throw new NeedAuth();
+  },
+  async api(url, opts = {}, retried = false) {
+    await this.ensureToken();
     const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + this.token } });
-    if (r.status === 401) { this.token = null; localStorage.removeItem('tok'); throw new NeedAuth(); }
+    if (r.status === 401) { this.token = null; localStorage.removeItem('tok');
+      if (IS_NATIVE && !retried && !(opts.body instanceof ReadableStream)) return this.api(url, opts, true);
+      throw new NeedAuth(); }
     if (!r.ok) { const t = await r.text(); const e = new Error(`Drive-fejl ${r.status}: ${t.slice(0, 160)}`); e.status = r.status; throw e; }
     return r;
   },
@@ -356,7 +393,7 @@ const Sync = {
     if (this.busy) { this.again = true; return; }
     this.busy = true; this.set('syncing');
     try {
-      if (!Drive.hasToken()) throw new NeedAuth();
+      await Drive.ensureToken();
       try { await Drive.init(); } catch (e) { if (e.status === 404) { Drive.ids = {}; await Drive.init(); } else throw e; }
       await this.pushFiles();
       const remote = await Drive.readData();
@@ -433,7 +470,7 @@ async function addFile(file, ownerType, ownerId, kind, label) {
 async function getBlob(f) {
   const cached = await DB.get('blobs', f.id); if (cached) return cached;
   if (!f.driveId) throw new Error('Filen er endnu ikke uploadet fra den enhed, hvor den blev tilføjet.');
-  if (!Drive.hasToken()) throw new Error('Log ind på Google Drive for at hente filen.');
+  try { await Drive.ensureToken(); } catch { throw new Error('Log ind på Google Drive for at hente filen.'); }
   toast('Henter fil fra Google Drive…', 1500);
   const blob = await Drive.downloadFile(f.driveId);
   const typed = blob.type ? blob : new Blob([blob], { type: f.mime });
@@ -1132,7 +1169,7 @@ function renderSettings() {
   view().innerHTML = `
     <div class="card"><h3>☁️ Google Drive</h3>
       <p class="muted small">Alle data og bilag gemmes i mappen <b>${ROOT_FOLDER}</b> på dit Google Drive, så tablet og telefon altid er synkroniseret. Appen kan kun se de filer, den selv har oprettet.</p>
-      <div class="f"><label class="lbl">Google OAuth Client ID</label><input id="cid" value="${esc(Drive.clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></div>
+      ${IS_NATIVE ? '' : `<div class="f"><label class="lbl">Google OAuth Client ID</label><input id="cid" value="${esc(Drive.clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></div>`}
       ${en ? `<p>Status: <b>${{ ok: 'Synkroniseret', syncing: 'Synkroniserer…', auth: 'Login udløbet', error: 'Fejl', local: '' }[Sync.state]}</b>${last ? ` · sidst ${new Date(last).toLocaleString('da-DK')}` : ''}
         ${Sync.err ? `<br><span class="small" style="color:var(--bad)">${esc(Sync.err)}</span>` : ''}${pendingUp ? `<br><span class="small muted">${pendingUp} fil(er) venter på upload</span>` : ''}</p>
         <div class="row"><button class="btn primary" data-act="syncNow">⟳ Synkronisér nu</button>${Sync.state === 'auth' ? '<button class="btn" data-act="connect">Log ind igen</button>' : ''}
@@ -1149,10 +1186,11 @@ function renderSettings() {
       <div class="row"><button class="btn" data-act="exportJson">⤓ Eksportér data</button><label class="btn">⤒ Importér<input type="file" accept="application/json,.json" hidden id="imp"></label></div>
     </div>
     <div class="card" style="margin-top:14px"><h3>📲 Installation</h3>
-      <p class="muted small">Åbn appens adresse i Chrome, tryk på ⋮-menuen og vælg <b>Installér app</b> / <b>Føj til startskærm</b>. Gør det samme på telefonen, og forbind til samme Google-konto.</p>
-      <p class="muted small">Version ${APP_VERSION}</p>
+      ${IS_NATIVE ? `<p class="muted small">Du bruger Android-appen. Nye versioner hentes fra <a href="https://github.com/peterelkjaer/koretojslog/releases/latest" target="_blank" rel="noopener">GitHub (seneste version)</a> og installeres oven på den gamle – dine data bevares.</p>`
+        : `<p class="muted small">Åbn appens adresse i Chrome, tryk på ⋮-menuen og vælg <b>Installér app</b> / <b>Føj til startskærm</b>. Gør det samme på telefonen, og forbind til samme Google-konto.</p>`}
+      <p class="muted small">Version ${APP_VERSION}${IS_NATIVE ? ' · Android-app' : ''}</p>
     </div>`;
-  $('#cid').onchange = e => { localStorage.setItem('clientId', e.target.value.trim()); toast('Client ID gemt'); };
+  if ($('#cid')) $('#cid').onchange = e => { localStorage.setItem('clientId', e.target.value.trim()); toast('Client ID gemt'); };
   $('#imp').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
     try { const d = JSON.parse(await f.text()); if (!d.vehicles) throw new Error('Ugyldig fil');
@@ -1161,6 +1199,10 @@ function renderSettings() {
 }
 
 /* ---------- Handlinger ---------- */
+function doPrint() {
+  if (IS_NATIVE) return NH.print({ name: 'Køretøjslog ' + today() }).catch(e => toast(e.message));
+  window.print();
+}
 const ACT = {
   quickAdd: () => quickAdd(),
   addVehicle: () => vehicleForm(),
@@ -1182,9 +1224,9 @@ const ACT = {
   exportCsv: () => exportCsv(),
   theme: d => { setTheme(d.id); render(); },
   toggleTheme: () => { setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); if (currentRoute().name === 'settings') render(); },
-  print: () => window.print(),
+  print: () => doPrint(),
   connect: () => connectDrive(),
-  syncNow: () => Drive.hasToken() ? Sync.run().then(render) : connectDrive(),
+  syncNow: () => (Drive.hasToken() || IS_NATIVE) ? Sync.run().then(render) : connectDrive(),
   syncPill: () => { if (Sync.state === 'auth') connectDrive(); else if (Sync.state === 'local') location.hash = '#/settings'; else Sync.run().then(render); },
   disconnect: () => { if (!confirm('Afbryd forbindelsen til Google Drive? Data bliver liggende både på denne enhed og på Drive.')) return;
     Drive.logout(); localStorage.removeItem('mode'); Drive.ids = {}; Drive.saveIds(); Sync.set('local'); render(); },
@@ -1205,7 +1247,7 @@ async function start() {
   matchMedia('(min-width: 840px)').addEventListener('change', render);
   render();
   if (Drive.enabled()) { Sync.run(); } else Sync.set('local');
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Drive.enabled() && Drive.hasToken()) Sync.run(); });
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.warn);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Drive.enabled() && (Drive.hasToken() || IS_NATIVE)) Sync.run(); });
+  if (!IS_NATIVE && 'serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.warn);
 }
 start();

@@ -1,0 +1,18 @@
+{
+  "name": "koretojslog-android",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "copy-web": "node scripts/copy-web.js",
+    "sync": "npm run copy-web && npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.6.2",
+    "@capacitor/core": "8.6.2",
+    "@capacitor/filesystem": "8.1.5",
+    "@capacitor/share": "8.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.2"
+  }
+}

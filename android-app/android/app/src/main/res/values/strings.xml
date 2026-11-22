@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Køretøjslog</string>
+    <string name="title_activity_main">Køretøjslog</string>
+    <string name="package_name">dk.peterelkjaer.koretojslog</string>
+    <string name="custom_url_scheme">dk.peterelkjaer.koretojslog</string>
+</resources>
