@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -538,10 +538,14 @@ function modal(title, inner, opts = {}) {
 }
 
 /* ---------- Formularer ---------- */
-function vehicleOptions(sel) {
-  return live('vehicles').map(v => `<option value="${v.id}" ${v.id === sel ? 'selected' : ''}>${esc(v.name)}</option>`).join('');
+const isSold = v => !!(v && (v.sellDate || v.sellPrice != null));
+const activeVehicles = () => live('vehicles').filter(v => !isSold(v));
+const isActiveId = id => { const v = byId('vehicles', id); return !!v && !isSold(v); };
+// Solgte køretøjer vises kun i valglister, hvis de allerede er valgt (eller i rapporter)
+function vehicleOptions(sel, includeSold) {
+  return live('vehicles').filter(v => includeSold || !isSold(v) || v.id === sel).map(v => `<option value="${v.id}" ${v.id === sel ? 'selected' : ''}>${esc(v.name)}</option>`).join('');
 }
-function needVehicle() { if (!live('vehicles').length) { toast('Opret først et køretøj'); vehicleForm(); return true; } return false; }
+function needVehicle() { if (!activeVehicles().length) { toast('Opret først et køretøj'); vehicleForm(); return true; } return false; }
 
 function vehicleForm(id) {
   const v = id ? { ...byId('vehicles', id) } : { id: uid(), name: '', fuel: 'Benzin' };
@@ -671,7 +675,7 @@ function entryForm(id, preset = {}) {
     softDelete('entries', id); deleteFilesOf('entry', id); await persist(); await closeLayer(); render(); toast('Slettet');
   });
 }
-const lastVehicle = () => { const l = localStorage.getItem('lastVehicle'); return byId('vehicles', l) ? l : live('vehicles')[0]?.id; };
+const lastVehicle = () => { const l = localStorage.getItem('lastVehicle'); return isActiveId(l) ? l : activeVehicles()[0]?.id; };
 
 function entryView(id) {
   const e = byId('entries', id); if (!e) return;
@@ -826,17 +830,21 @@ function yearCost(vid, year) { return live('entries').filter(e => (!vid || e.veh
 
 function renderHome() {
   setTitle('Oversigt', 'home');
-  const vs = live('vehicles');
+  const vs = activeVehicles();
   if (!vs.length) {
-    view().innerHTML = storageBanner() + `<div class="empty"><div class="e">🚗</div><h2>Velkommen til Køretøjslog</h2>
+    view().innerHTML = storageBanner() + (live('vehicles').length ? `<div class="empty"><div class="e">🚗</div><h2>Ingen aktive køretøjer</h2>
+      <p>Alle dine køretøjer er markeret som solgt. De ligger under <a href="#/vehicles">Køretøjer</a>.</p><button class="btn primary" data-act="addVehicle">＋ Tilføj køretøj</button></div>` : '') +
+      (live('vehicles').length ? '' : `<div class="empty"><div class="e">🚗</div><h2>Velkommen til Køretøjslog</h2>
       <p>Start med at oprette dit første køretøj.</p><button class="btn primary" data-act="addVehicle">＋ Tilføj køretøj</button>
-      ${!Drive.enabled() ? '<p class="small" style="margin-top:20px">Har du allerede data på Google Drive fra en anden enhed? <a href="#/settings">Forbind Google Drive</a> først.</p>' : ''}</div>`;
+      ${!Drive.enabled() ? '<p class="small" style="margin-top:20px">Har du allerede data på Google Drive fra en anden enhed? <a href="#/settings">Forbind Google Drive</a> først.</p>' : ''}</div>`);
     return;
   }
   const y = today().slice(0, 4);
-  const rems = sortedReminders().filter(x => x.s.level !== 'ok').slice(0, 8);
-  const upcoming = rems.length ? rems : sortedReminders().slice(0, 3);
-  const recent = live('entries').sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
+  const activeRems = sortedReminders().filter(x => isActiveId(x.r.vehicleId));
+  const rems = activeRems.filter(x => x.s.level !== 'ok').slice(0, 8);
+  const upcoming = rems.length ? rems : activeRems.slice(0, 3);
+  const recent = live('entries').filter(e => isActiveId(e.vehicleId)).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
+  const activeCost = yr => vs.reduce((a, v) => a + yearCost(v.id, yr), 0);
   view().innerHTML = storageBanner() + `
     <div class="row no-print" style="margin-bottom:14px"><button class="btn primary" data-act="addEntry">🧾 Udgift / service</button><button class="btn" data-act="addReading">🔢 Kilometerstand</button></div>
     <div class="two-col"><div>
@@ -848,8 +856,8 @@ function renderHome() {
       <h2 style="margin-top:0">${rems.length ? 'Kræver opmærksomhed' : 'Kommende vedligehold'}</h2>
       <div class="list">${upcoming.length ? upcoming.map(x => remItem(x.r, x.s, vs.length > 1)).join('') : '<p class="muted small">Ingen påmindelser oprettet. Åbn et køretøj og tilføj f.eks. olieskift.</p>'}</div>
       <h2>Udgifter ${y}</h2>
-      <div class="kpis"><div class="kpi"><div class="l">I alt</div><div class="v">${fmtKr(yearCost(null, y))}</div></div>
-      <div class="kpi"><div class="l">Sidste år</div><div class="v">${fmtKr(yearCost(null, String(y - 1)))}</div></div></div>
+      <div class="kpis"><div class="kpi"><div class="l">I alt</div><div class="v">${fmtKr(activeCost(y))}</div></div>
+      <div class="kpi"><div class="l">Sidste år</div><div class="v">${fmtKr(activeCost(String(y - 1)))}</div></div></div>
     </div></div>`;
 }
 function vehicleCard(v, y) {
@@ -871,9 +879,15 @@ function entryItem(e, showVehicle) {
 
 function renderVehicles() {
   setTitle('Køretøjer', 'vehicles');
-  const vs = live('vehicles'); const y = today().slice(0, 4);
+  const vs = activeVehicles(); const sold = live('vehicles').filter(isSold)
+    .sort((a, b) => (b.sellDate || '').localeCompare(a.sellDate || '')); const y = today().slice(0, 4);
   view().innerHTML = storageBanner() + `<div class="row" style="margin-bottom:14px"><button class="btn primary" data-act="addVehicle">＋ Tilføj køretøj</button></div>
-    ${vs.length ? `<div class="grid">${vs.map(v => vehicleCard(v, y)).join('')}</div>` : '<div class="empty"><div class="e">🚗</div><p>Ingen køretøjer endnu.</p></div>'}`;
+    ${vs.length ? `<div class="grid">${vs.map(v => vehicleCard(v, y)).join('')}</div>` : `<div class="empty"><div class="e">🚗</div><p>${sold.length ? 'Ingen aktive køretøjer.' : 'Ingen køretøjer endnu.'}</p></div>`}
+    ${sold.length ? `<h2 style="margin-top:28px">Solgte køretøjer <span class="muted small">(${sold.length})</span></h2>
+      <div class="list">${sold.map(v => { const o = ownership(v); return `<div class="item" data-act="goVehicle" data-id="${v.id}"><div class="ic">🚗</div>
+        <div class="body"><div class="t">${esc(v.name)}${v.plate ? ` <span class="muted small">· ${esc(v.plate)}</span>` : ''}</div>
+        <div class="s">${esc([v.make, v.model, v.year].filter(Boolean).join(' '))}${v.buyDate || v.sellDate ? ` · ejet ${v.buyDate ? fmtDate(v.buyDate) : '?'} – ${v.sellDate ? fmtDate(v.sellDate) : '?'}` : ''}</div></div>
+        ${o ? `<div class="amt" title="Samlet pris for ejerskabet">${fmtKr(o.total)}</div>` : ''}</div>`; }).join('')}</div>` : ''}`;
 }
 
 const vTab = {}; const vSearch = {};
@@ -1027,7 +1041,7 @@ function renderReports() {
   view().innerHTML = `
     <div class="card no-print">
       <div class="fgrid">
-        <div class="f"><label class="lbl">Køretøj</label><select id="rVeh"><option value="">Alle køretøjer</option>${vehicleOptions(rf.vehicle)}</select></div>
+        <div class="f"><label class="lbl">Køretøj</label><select id="rVeh"><option value="">Alle køretøjer</option>${vehicleOptions(rf.vehicle, true)}</select></div>
         <div class="f"><label class="lbl">Periode</label><select id="rPer">${periods.map(([k, l]) => `<option value="${k}" ${k === rf.period ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         ${rf.period === 'custom' ? `<div class="f"><label class="lbl">Fra</label><input type="date" id="rFrom" value="${rf.from}"></div><div class="f"><label class="lbl">Til</label><input type="date" id="rTo" value="${rf.to}"></div>` : ''}
       </div>
