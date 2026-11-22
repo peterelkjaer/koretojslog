@@ -1,10 +1,17 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
-const NativePl = name => (IS_NATIVE ? window.Capacitor.registerPlugin(name) : null);
+const NativePl = name => {
+  if (!IS_NATIVE) return null;
+  try {
+    const C = window.Capacitor;
+    if (typeof C.registerPlugin === 'function') return C.registerPlugin(name);
+    return (C.Plugins && C.Plugins[name]) || null;
+  } catch (e) { console.error('Plugin ' + name, e); return null; }
+};
 const NH = NativePl('NativeHelper'), NFs = NativePl('Filesystem'), NShare = NativePl('Share'), NBars = NativePl('SystemBars');
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3';
@@ -86,8 +93,10 @@ function applyTheme() {
   const dark = t === 'dark' || (t === 'auto' && darkMq.matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#0d1b2c' : '#1e3a5f');
-  if (NBars) { NBars.setStyle({ style: dark ? 'DARK' : 'LIGHT', bar: 'StatusBar' }).catch(() => {});
-    NBars.setStyle({ style: 'DARK', bar: 'NavigationBar' }).catch(() => {}); }
+  if (NBars) try {
+    Promise.resolve(NBars.setStyle({ style: dark ? 'DARK' : 'LIGHT', bar: 'StatusBar' })).catch(() => {});
+    Promise.resolve(NBars.setStyle({ style: 'DARK', bar: 'NavigationBar' })).catch(() => {});
+  } catch (e) { console.warn(e); }
   const b = document.getElementById('themeBtn'); if (b) { b.textContent = dark ? '☀️' : '🌙'; b.title = dark ? 'Skift til lyst tema' : 'Skift til mørkt tema'; }
 }
 function setTheme(t) { localStorage.setItem('theme', t); applyTheme(); }
