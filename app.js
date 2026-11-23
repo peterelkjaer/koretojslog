@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -160,9 +160,12 @@ const sig = d => JSON.stringify(COLLS.map(c => [...(d[c] || [])].sort((x, y) => 
 
 /* ---------- Beregninger ---------- */
 function kmPoints(vid) {
-  const pts = [];
-  for (const r of live('readings')) if (r.vehicleId === vid && r.km != null) pts.push({ date: r.date, km: r.km });
-  for (const e of live('entries')) if (e.vehicleId === vid && e.km != null) pts.push({ date: e.date, km: e.km });
+  const pts = [], auto = [];
+  for (const r of live('readings')) if (r.vehicleId === vid && r.km != null)
+    (r.auto ? auto : pts).push({ date: r.date, km: r.km, t: r.createdAt || r.updatedAt || '' });
+  for (const e of live('entries')) if (e.vehicleId === vid && e.km != null) pts.push({ date: e.date, km: e.km, t: e.createdAt || e.updatedAt || '' });
+  // Automatiske (GPS-)aflæsninger erstattes af en manuel aflæsning, der er indtastet senere og dateret samme dag eller senere
+  for (const a of auto) if (!pts.some(m => m.t > a.t && m.date >= a.date)) pts.push(a);
   return pts.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km);
 }
 function currentKm(vid) { let m = null; for (const p of kmPoints(vid)) if (m == null || p.km > m) m = p.km; return m; }
@@ -720,6 +723,7 @@ function entryForm(id, preset = {}) {
     const cur = currentKm(e.vehicleId);
     if (e.km != null && cur != null && e.km < cur && !id && !confirm(`Kilometerstanden (${fmtNum(e.km)}) er lavere end den seneste (${fmtNum(cur)}). Gem alligevel?`)) return;
     if (!e.createdAt) e.createdAt = nowIso();
+    if (e.km != null && !id) calibrate(e.vehicleId, e.date, e.km, e.createdAt);
     upsert('entries', e);
     for (const fid of removed) softDelete('files', fid);
     for (const p of pending) await addFile(p._file, 'entry', e.id, 'receipt');
@@ -783,6 +787,8 @@ function readingForm(vid, rid) {
     r.vehicleId = fd.get('vehicleId'); r.date = fd.get('date'); r.km = num(fd.get('km'));
     const c = currentKm(r.vehicleId);
     if (!rid && c != null && r.km < c && !confirm(`${fmtNum(r.km)} km er lavere end seneste registrering (${fmtNum(c)} km). Gem alligevel?`)) return;
+    if (!r.createdAt) r.createdAt = nowIso(); r.auto = false;
+    calibrate(r.vehicleId, r.date, r.km, r.createdAt);
     upsert('readings', r); localStorage.setItem('lastVehicle', r.vehicleId);
     await persist(); await closeLayer(); render();
     const due = sortedReminders(r.vehicleId).filter(x => x.s.level === 'overdue' || x.s.level === 'soon');
@@ -904,6 +910,7 @@ function renderHome() {
   const activeCost = yr => vs.reduce((a, v) => a + yearCost(v.id, yr), 0);
   const tireWarn = vs.flatMap(v => currentTires(v.id).map(t => ({ t, a: tireAge(t) }))).filter(x => x.a && x.a.level !== 'ok');
   view().innerHTML = storageBanner() + `
+    ${IS_NATIVE ? '<div id="liveTrip"></div>' : ''}
     <div class="row no-print" style="margin-bottom:14px"><button class="btn primary" data-act="addEntry">🧾 Udgift / service</button><button class="btn" data-act="addReading">🔢 Kilometerstand</button></div>
     <div class="two-col"><div>
       <h2 style="margin-top:0">Dine køretøjer</h2>
@@ -958,10 +965,10 @@ function renderVehicle(id) {
   let tab = vTab[id] || 'history';
   if (wide && (tab === 'reminders' || tab === 'docs')) tab = 'history';
   const km = currentKm(id); const kpd = kmPerDay(id); const y = today().slice(0, 4);
-  const tabs = wide ? [['history', 'Historik'], ['km', 'Kilometer'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter']]
-    : [['history', 'Historik'], ['reminders', 'Vedligehold'], ['km', 'Km'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter'], ['docs', 'Dokumenter']];
+  const tabs = wide ? [['history', 'Historik'], ['trips', 'Ture'], ['km', 'Kilometer'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter']]
+    : [['history', 'Historik'], ['trips', 'Ture'], ['reminders', 'Vedligehold'], ['km', 'Km'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter'], ['docs', 'Dokumenter']];
   const panel = { history: historyPanel(v), km: kmPanel(v), reminders: remindersPanel(v), docs: docsPanel(v),
-    tires: tiresPanel(v), parts: partsPanel(v), recurring: recurringPanel(v) };
+    tires: tiresPanel(v), parts: partsPanel(v), recurring: recurringPanel(v), trips: tripsPanel(v) };
   view().innerHTML = `
     <div class="card">
       <div class="row between"><div><div class="muted small">${esc([v.make, v.model, v.year, v.fuel].filter(Boolean).join(' · '))}${v.plate ? ' · <b>' + esc(v.plate) + '</b>' : ''}</div>
@@ -983,6 +990,7 @@ function renderVehicle(id) {
       <div id="vpanel">${panel[tab]}</div>
     </div>${wide ? `<div><h2>Vedligehold</h2>${panel.reminders}<h2>Dokumenter og manualer</h2>${panel.docs}</div>` : ''}</div>`;
   const s = $('#hsearch'); if (s) { s.oninput = () => { vSearch[id] = s.value; $('#hlist').innerHTML = historyList(v); }; }
+  if (tab === 'trips' && IS_NATIVE) renderAutoLog(v);
   const ps = $('#psearch'); if (ps) { ps.oninput = () => { pSearch[id] = ps.value; $('#plist').innerHTML = partsList(v); }; }
 }
 function historyList(v) {
@@ -1452,6 +1460,260 @@ function seasonTable(vid) {
     <p class="muted small">En sæson regnes fra 1. ${MONTHS[sm - 1]} og 12 måneder frem, så vinterens forsikring og afgifter tæller med. Startmåneden ændres under køretøjet (✏️).</p>`;
 }
 
+/* ---------- Ture og automatisk km-logning ---------- */
+function decodePoly(str) {
+  const pts = []; let i = 0, lat = 0, lng = 0;
+  while (str && i < str.length) {
+    for (const k of [0, 1]) {
+      let b, shift = 0, result = 0;
+      do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = (result & 1) ? ~(result >> 1) : (result >> 1);
+      if (k === 0) lat += d; else lng += d;
+    }
+    pts.push([lat / 1e5, lng / 1e5]);
+  }
+  return pts;
+}
+const fmtTime = ts => new Date(ts).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
+const fmtDur = ms => { const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m / 60)} t ${m % 60} min` : `${m} min`; };
+const tripAvg = t => t.endTs > t.startTs ? t.km / ((t.endTs - t.startTs) / 3.6e6) : null;
+
+/* Kalibrering: sammenlign en manuel kilometerstand med GPS-turene siden forrige manuelle aflæsning */
+function calibrate(vid, date, km, createdAt) {
+  const v = byId('vehicles', vid); if (!v || km == null) return;
+  const manual = [];
+  for (const r of live('readings')) if (r.vehicleId === vid && !r.auto && r.km != null) manual.push({ date: r.date, km: r.km, t: r.createdAt || r.updatedAt || '' });
+  for (const e of live('entries')) if (e.vehicleId === vid && e.km != null) manual.push({ date: e.date, km: e.km, t: e.createdAt || e.updatedAt || '' });
+  const prev = manual.filter(p => p.t < createdAt && p.km < km).sort((a, b) => b.t.localeCompare(a.t))[0];
+  if (!prev) return;
+  const from = Date.parse(prev.t), to = Date.parse(createdAt);
+  const trips = live('trips').filter(t => t.vehicleId === vid && t.endTs > from && t.endTs <= to);
+  const gps = trips.reduce((a, t) => a + (t.gpsKm || 0), 0);
+  if (gps < 20 || trips.length === 0) return;
+  // Kun hvis alle km i perioden er kørt med logning (ellers ville faktoren blive for stor)
+  const f = (km - prev.km) / gps;
+  if (f < 0.85 || f > 1.2) return;
+  const nf = v.kmFactor ? (v.kmFactor + f) / 2 : f;
+  upsert('vehicles', { ...v, kmFactor: Math.round(nf * 10000) / 10000 });
+}
+
+let importing = false;
+async function importTrips() {
+  if (!IS_NATIVE || !NH || importing) return;
+  importing = true;
+  try {
+    const res = await NH.getTrips(); const list = (res && res.trips) || [];
+    if (!list.length) return;
+    const ack = []; let added = 0, addedKm = 0;
+    for (const t of list.sort((a, b) => a.start - b.start)) {
+      if (data.trips.some(x => x.id === t.id)) { ack.push(t.id); continue; }
+      const addr = String(t.address || '').toUpperCase();
+      const v = live('vehicles').find(v => (v.btAddress && v.btAddress.toUpperCase() === addr) || ('MANUAL-' + v.id).toUpperCase() === addr);
+      if (!v) continue; // venter, til enheden er koblet til et køretøj
+      const gps = (t.meters || 0) / 1000; const km = Math.round(gps * (v.kmFactor || 1) * 10) / 10;
+      const base = currentKm(v.id);
+      upsert('trips', { id: t.id, vehicleId: v.id, date: localDate(new Date(t.start)), startTs: t.start, endTs: t.end, gpsKm: Math.round(gps * 100) / 100,
+        km, maxKmh: Math.round((t.maxSpeed || 0) * 3.6), poly: t.poly || '', title: '', notes: '' });
+      if (base != null) upsert('readings', { id: 'trip_' + t.id, vehicleId: v.id, date: localDate(new Date(t.end || t.start)), km: Math.round(base + km), auto: true, tripId: t.id, createdAt: nowIso() });
+      ack.push(t.id); added++; addedKm += km;
+    }
+    if (added) { await persist(); render(); toast(`${added} tur${added > 1 ? 'e' : ''} hentet · ${fmtDec(addedKm)} km`); }
+    if (ack.length) await NH.ackTrips({ ids: ack });
+  } catch (e) { console.warn('importTrips', e); }
+  finally { importing = false; }
+}
+
+let wasActive = false;
+async function pollTrip() {
+  if (!IS_NATIVE || !NH || document.visibilityState !== 'visible') return;
+  try {
+    const s = await NH.autoLogStatus();
+    const el = $('#liveTrip');
+    if (el) el.innerHTML = s.tripActive ? `<div class="banner" style="background:var(--ok-bg);color:var(--ok)">🔴 Logger tur${s.activeName ? ' – ' + esc(s.activeName) : ''}: <b>${fmtDec(s.activeKm || 0)} km</b> siden ${fmtTime(s.activeStart)}</div>` : '';
+    if (wasActive && !s.tripActive) setTimeout(importTrips, 2000);
+    wasActive = s.tripActive;
+  } catch (e) { /* ignorer */ }
+}
+
+function tripsPanel(v) {
+  const ts = live('trips').filter(t => t.vehicleId === v.id).sort((a, b) => b.startTs - a.startTs);
+  const y = today().slice(0, 4); const yr = ts.filter(t => t.date.startsWith(y));
+  let out = IS_NATIVE ? `<div class="card" id="autologCard" style="margin-bottom:14px"><span class="muted small">Henter status …</span></div>`
+    : `<p class="muted small" style="margin-top:0">Turene logges automatisk af Android-appen, når telefonen forbinder til køretøjets skærm.</p>`;
+  if (!ts.length) return out + '<p class="muted small">Ingen ture endnu.</p>';
+  out += `<div class="kpis" style="margin-bottom:10px"><div class="kpi"><div class="l">Ture i ${y}</div><div class="v">${yr.length}</div></div>
+    <div class="kpi"><div class="l">Kørt i ${y}</div><div class="v">${fmtKm(Math.round(yr.reduce((a, t) => a + t.km, 0)))}</div></div>
+    <div class="kpi"><div class="l">Længste tur</div><div class="v">${fmtKm(Math.round(Math.max(...ts.map(t => t.km))))}</div></div></div>
+    <div class="row" style="margin-bottom:8px"><button class="btn" data-act="allTrips" data-id="${v.id}">🗺️ Vis alle ture på kort</button></div>`;
+  let month = null;
+  for (const t of ts) {
+    const m = t.date.slice(0, 7);
+    if (m !== month) { month = m; out += `<div class="year-h"><span>${fmtMonth(t.date)}</span><span>${fmtKm(Math.round(ts.filter(x => x.date.startsWith(m)).reduce((a, x) => a + x.km, 0)))}</span></div>`; }
+    const avg = tripAvg(t);
+    out += `<div class="item" data-act="viewTrip" data-id="${t.id}"><div class="ic">🛣️</div><div class="body">
+      <div class="t">${esc(t.title || fmtDate(t.date))}</div>
+      <div class="s">${t.title ? fmtDate(t.date) + ' · ' : ''}${fmtTime(t.startTs)}–${fmtTime(t.endTs)} · ${fmtDur(t.endTs - t.startTs)}${avg ? ` · gns. ${Math.round(avg)} km/t` : ''}</div></div>
+      <div class="amt">${fmtDec(t.km)} km</div></div>`;
+  }
+  return out;
+}
+
+async function renderAutoLog(v) {
+  const el = $('#autologCard'); if (!el || !NH) return;
+  let s; try { s = await NH.autoLogStatus(); } catch (e) { el.innerHTML = `<span class="muted small">Status kunne ikke hentes: ${esc(e.message)}</span>`; return; }
+  const addr = (v.btAddress || '').toUpperCase();
+  const assoc = (s.associations || []).map(a => a.toUpperCase()).includes(addr);
+  const row = (ok, label, tab, fixLabel) => `<div class="row between" style="padding:5px 0;border-bottom:1px solid var(--line)"><span>${ok ? '✅' : '⚠️'} ${label}</span>${ok ? '' : `<button class="btn sm" data-act="fixPerm" data-id="${v.id}" data-tab="${tab}">${fixLabel}</button>`}</div>`;
+  const active = s.tripActive && (s.activeAddress || '').toUpperCase() === (addr || ('MANUAL-' + v.id).toUpperCase());
+  const activeOther = s.tripActive && !active;
+  el.innerHTML = `<div class="row between"><h3>🛰️ Automatisk km-logning</h3>${v.kmFactor ? `<span class="muted small">GPS-korrektion ${v.kmFactor >= 1 ? '+' : ''}${fmtDec((v.kmFactor - 1) * 100)} %</span>` : ''}</div>
+    <p class="small" style="margin:6px 0 10px">${v.btName ? `Logger ture, når telefonen forbinder til <b>${esc(v.btName)}</b>.` : 'Vælg den Bluetooth-enhed (f.eks. skærmen), som telefonen forbinder til i dette køretøj.'}</p>
+    <div class="row" style="margin-bottom:10px"><button class="btn ${v.btName ? '' : 'primary'}" data-act="pickBt" data-id="${v.id}">📶 ${v.btName ? 'Skift enhed' : 'Vælg Bluetooth-enhed'}</button>
+      ${v.btName ? `<button class="btn danger" data-act="removeBt" data-id="${v.id}">Slå fra</button>` : ''}</div>
+    ${v.btName ? row(s.location, 'Placering', 'location', 'Tillad') + row(s.backgroundLocation, 'Placering “Tillad altid”', 'backgroundLocation', 'Indstil') +
+      row(s.bluetooth, 'Bluetooth', 'bluetooth', 'Tillad') + row(s.notifications, 'Notifikationer', 'notifications', 'Tillad') +
+      row(s.batteryUnrestricted, 'Batteri: ubegrænset', 'battery', 'Indstil') + (s.sdk >= 33 ? row(assoc, 'Tilknyttet som companion-enhed', 'associate', 'Tilknyt') : '') : ''}
+    <div class="row" style="margin-top:12px">${active ? `<span class="badge b-ok">🔴 Logger nu: ${fmtDec(s.activeKm || 0)} km</span><button class="btn sm" data-act="stopTrip" data-id="${v.id}">⏹ Stop tur</button>`
+      : activeOther ? `<span class="muted small">Logger en tur for ${esc(s.activeName || 'et andet køretøj')}.</span>`
+      : `<button class="btn sm" data-act="manualTrip" data-id="${v.id}">▶ Start tur manuelt</button><span class="muted small">Til test, eller hvis du kører uden skærmen</span>`}</div>
+    ${s.log ? `<details style="margin-top:10px"><summary class="muted small">Hændelseslog</summary><pre class="small" style="white-space:pre-wrap;margin:6px 0 0">${esc(s.log)}</pre></details>` : ''}
+    ${v.btAddress ? `<details style="margin-top:6px"><summary class="muted small">Tasker-genvej</summary><p class="small" style="margin:6px 0 0">Start: <code>koretojslog://trip/start?device=${esc(addr)}</code><br>Stop: <code>koretojslog://trip/stop</code></p></details>` : ''}`;
+}
+
+async function pickBtDevice(vid) {
+  const v = byId('vehicles', vid);
+  try {
+    let s = await NH.requestPerm({ which: 'bluetooth' });
+    if (!s.bluetooth) { toast('Appen skal have adgang til Bluetooth for at se dine enheder'); return; }
+    const { devices } = await NH.listBonded();
+    if (!devices.length) { toast('Ingen parrede Bluetooth-enheder fundet'); return; }
+    const m = modal('Vælg Bluetooth-enhed', `<p class="muted small" style="margin-top:0">Vælg den enhed, telefonen forbinder til i <b>${esc(v.name)}</b> – f.eks. skærmen eller Android Auto-adapteren.</p>
+      <div class="quick">${devices.sort((a, b) => a.name.localeCompare(b.name)).map(d => `<button data-addr="${esc(d.address)}" data-name="${esc(d.name)}"><span>📶</span><div><b>${esc(d.name)}</b><div class="muted small">${esc(d.address)}</div></div></button>`).join('')}</div>`);
+    $$('[data-addr]', m).forEach(b => b.onclick = async () => {
+      await closeLayer();
+      if (v.btAddress && v.btAddress !== b.dataset.addr) { try { await NH.disableAutoLog({ address: v.btAddress }); } catch (e) { } }
+      upsert('vehicles', { ...v, btAddress: b.dataset.addr, btName: b.dataset.name }); await persist(); render();
+      await setupAutoLog(vid);
+    });
+  } catch (e) { toast('Fejl: ' + e.message, 4000); }
+}
+
+async function setupAutoLog(vid) {
+  const v = byId('vehicles', vid); if (!v?.btAddress) return;
+  try {
+    let s = await NH.requestPerm({ which: 'location' });
+    if (!s.location) { toast('Placering er nødvendig for at måle turen'); return; }
+    if (!s.backgroundLocation) {
+      if (confirm('Næste skærm: vælg “Tillad altid” under Placering, så appen kan logge ture, mens den ikke er åben. Tryk derefter tilbage.')) s = await NH.requestPerm({ which: 'backgroundLocation' });
+    }
+    s = await NH.requestPerm({ which: 'notifications' });
+    const r = await NH.enableAutoLog({ address: v.btAddress, name: v.name });
+    toast(r.mode === 'companion' ? `Klar! Ture logges, når telefonen forbinder til ${v.btName}` : 'Klar! (Bluetooth-lytter)', 4000);
+  } catch (e) { toast(e.code === 'CANCELLED' ? 'Tilknytning annulleret – tryk “Tilknyt” for at prøve igen' : 'Fejl: ' + e.message, 5000); }
+  renderAutoLog(byId('vehicles', vid));
+}
+
+async function removeBtDevice(vid) {
+  const v = byId('vehicles', vid);
+  if (!confirm(`Slå automatisk logning fra for ${v.name}?`)) return;
+  try { await NH.disableAutoLog({ address: v.btAddress }); } catch (e) { }
+  const nv = { ...v }; delete nv.btAddress; delete nv.btName; upsert('vehicles', nv); await persist(); render();
+}
+
+async function fixPermission(vid, which) {
+  const v = byId('vehicles', vid);
+  try {
+    if (which === 'battery') await NH.requestBatteryExemption();
+    else if (which === 'associate') return setupAutoLog(vid);
+    else if (which === 'backgroundLocation') {
+      const s = await NH.requestPerm({ which });
+      if (!s.backgroundLocation && confirm('Åbn appens indstillinger og vælg Tilladelser → Placering → “Tillad altid”?')) await NH.openAppSettings();
+    } else {
+      const s = await NH.requestPerm({ which });
+      if (!s[which] && confirm('Tilladelsen blev afvist. Åbn appens indstillinger for at give den?')) await NH.openAppSettings();
+    }
+  } catch (e) { toast('Fejl: ' + e.message); }
+  setTimeout(() => renderAutoLog(byId('vehicles', vid)), 800);
+}
+
+/* Kort (Leaflet + OpenStreetMap) */
+let leafletP = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (!leafletP) leafletP = new Promise((res, rej) => {
+    const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'lib/leaflet/leaflet.css'; document.head.appendChild(l);
+    loadScript('lib/leaflet/leaflet.js').then(res, rej);
+  });
+  return leafletP;
+}
+async function drawMap(el, polys) {
+  await loadLeaflet();
+  const map = L.map(el, { zoomControl: true, attributionControl: true });
+  map.attributionControl.setPrefix(false);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  const bounds = [];
+  polys.forEach((pts, i) => {
+    if (pts.length < 2) return;
+    L.polyline(pts, { color: polys.length > 1 ? `hsl(${(i * 47) % 360} 70% 45%)` : '#1e5fae', weight: polys.length > 1 ? 3 : 5, opacity: 0.85 }).addTo(map);
+    if (polys.length === 1) {
+      L.circleMarker(pts[0], { radius: 7, color: '#16834a', fillOpacity: 1 }).addTo(map).bindTooltip('Start');
+      L.circleMarker(pts[pts.length - 1], { radius: 7, color: '#c62828', fillOpacity: 1 }).addTo(map).bindTooltip('Slut');
+    }
+    bounds.push(...pts);
+  });
+  if (bounds.length) map.fitBounds(bounds, { padding: [20, 20] }); else map.setView([56, 10.5], 6);
+  setTimeout(() => map.invalidateSize(), 250);
+  return map;
+}
+
+function tripView(id) {
+  const t = byId('trips', id); if (!t) return;
+  const avg = tripAvg(t);
+  const m = modal(t.title || `Tur ${fmtDate(t.date)}`, `
+    <div id="tripMap" style="height:${isWide() ? 420 : 300}px;border-radius:12px;overflow:hidden;background:var(--bg)"></div>
+    <div class="kpis" style="margin:12px 0">
+      <div class="kpi"><div class="l">Distance</div><div class="v">${fmtDec(t.km)} km</div></div>
+      <div class="kpi"><div class="l">Tid</div><div class="v" style="font-size:1.05rem">${fmtTime(t.startTs)}–${fmtTime(t.endTs)}</div><div class="l">${fmtDur(t.endTs - t.startTs)}</div></div>
+      ${avg ? `<div class="kpi"><div class="l">Gns. fart</div><div class="v">${Math.round(avg)} km/t</div></div>` : ''}
+      ${t.maxKmh ? `<div class="kpi"><div class="l">Topfart (GPS)</div><div class="v">${t.maxKmh} km/t</div></div>` : ''}
+    </div>
+    <form><div class="fgrid">
+      <div class="f full"><label>Titel</label><input name="title" value="${esc(t.title)}" placeholder="F.eks. Tur til Skagen"></div>
+      <div class="f full"><label>Noter</label><textarea name="notes">${esc(t.notes)}</textarea></div>
+      <div class="f"><label>Distance (km)</label><input name="km" type="number" step="0.1" inputmode="decimal" value="${t.km}"></div>
+      <div class="f"><label>Køretøj</label><select name="vehicleId">${vehicleOptions(t.vehicleId)}</select></div>
+    </div>
+    <p class="muted small">${esc(vehicleName(t.vehicleId))} · GPS målte ${fmtDec(t.gpsKm)} km. Kort: © OpenStreetMap.</p>
+    <div class="modal-actions"><button type="button" class="btn danger" data-del>Slet tur</button><span class="spacer"></span>
+      <button type="button" class="btn" data-close>Luk</button><button class="btn primary">Gem</button></div></form>`);
+  drawMap($('#tripMap', m), [decodePoly(t.poly)]).then(map => { m.closest('.modal-bg')._cleanup = () => map.remove(); }).catch(e => { $('#tripMap', m).innerHTML = `<p class="muted small" style="padding:20px">Kortet kunne ikke indlæses (${esc(e.message)}).</p>`; });
+  $('form', m).onsubmit = async ev => {
+    ev.preventDefault(); const fd = new FormData(ev.target);
+    const nt = { ...t, title: fd.get('title').trim(), notes: fd.get('notes').trim(), km: num(fd.get('km')) ?? t.km, vehicleId: fd.get('vehicleId') };
+    upsert('trips', nt);
+    const r = data.readings.find(x => x.id === 'trip_' + t.id && !x.deleted);
+    if (r && (nt.km !== t.km || nt.vehicleId !== t.vehicleId)) upsert('readings', { ...r, km: Math.round(r.km - t.km + nt.km), vehicleId: nt.vehicleId });
+    await persist(); await closeLayer(); render(); toast('Gemt');
+  };
+  $('[data-del]', m).onclick = async () => {
+    if (!confirm('Slet turen? Den automatiske kilometeraflæsning fra turen slettes også.')) return;
+    softDelete('trips', id); softDelete('readings', 'trip_' + id); await persist(); await closeLayer(); render();
+  };
+}
+
+function allTripsMap(vid) {
+  const v = byId('vehicles', vid);
+  const ts = live('trips').filter(t => t.vehicleId === vid && t.poly);
+  const years = [...new Set(ts.map(t => t.date.slice(0, 4)))].sort().reverse();
+  const m = modal(`Alle ture – ${v.name}`, `<div class="chips" style="margin-bottom:10px">${['alle', ...years].map((y, i) => `<button class="chip ${i === 0 ? 'on' : ''}" data-y="${y}">${y === 'alle' ? 'Alle år' : y}</button>`).join('')}</div>
+    <div id="allMap" style="height:${isWide() ? 520 : 420}px;border-radius:12px;overflow:hidden;background:var(--bg)"></div>
+    <p class="muted small">${ts.length} ture · ${fmtKm(Math.round(ts.reduce((a, t) => a + t.km, 0)))} · Kort: © OpenStreetMap</p>`);
+  const bg = m.closest('.modal-bg'); let map = null;
+  const draw = async y => { if (map) map.remove(); map = await drawMap($('#allMap', m), ts.filter(t => y === 'alle' || t.date.startsWith(y)).map(t => decodePoly(t.poly))); bg._cleanup = () => map && map.remove(); };
+  $$('[data-y]', m).forEach(b => b.onclick = () => { $$('[data-y]', m).forEach(x => x.classList.toggle('on', x === b)); draw(b.dataset.y); });
+  draw('alle').catch(e => { $('#allMap', m).innerHTML = `<p class="muted small" style="padding:20px">Kortet kunne ikke indlæses (${esc(e.message)}).</p>`; });
+}
+
 /* ---------- Handlinger ---------- */
 function doPrint() {
   if (IS_NATIVE) return NH.print({ name: 'Køretøjslog ' + today() }).catch(e => toast(e.message));
@@ -1480,6 +1742,11 @@ const ACT = {
   addRecurring: d => recurringForm(d.id), editRecurring: d => recurringForm(null, d.id),
   addTire: d => tireForm(d.id), editTire: d => tireForm(null, d.id), changeTire: d => { const t = byId('tires', d.id); tireForm(t.vehicleId, null, t); },
   addPart: d => partForm(d.id), editPart: d => partForm(null, d.id),
+  viewTrip: d => tripView(d.id), allTrips: d => allTripsMap(d.id),
+  pickBt: d => pickBtDevice(d.id), removeBt: d => removeBtDevice(d.id),
+  fixPerm: d => fixPermission(d.id, d.tab),
+  manualTrip: async d => { const v = byId('vehicles', d.id); await NH.startTrip({ address: 'MANUAL-' + v.id, name: v.name }); toast('Tur startet – kør en tur, og tryk Stop bagefter'); setTimeout(() => renderAutoLog(v), 1200); },
+  stopTrip: async d => { await NH.stopTrip(); toast('Tur stoppet'); setTimeout(async () => { await importTrips(); const v = byId('vehicles', d.id); if (v) renderAutoLog(v); }, 1500); },
   theme: d => { setTheme(d.id); render(); },
   toggleTheme: () => { setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); if (currentRoute().name === 'settings') render(); },
   print: () => doPrint(),
@@ -1502,6 +1769,7 @@ async function start() {
   applyTheme();
   try { const d = await DB.get('kv', 'data'); if (d) data = merge(emptyData(), d); } catch (e) { console.error(e); toast('Kunne ikke læse lokale data'); }
   if (generateRecurring()) persist();
+  if (IS_NATIVE) { setTimeout(importTrips, 1500); setInterval(pollTrip, 15000); }
   window.addEventListener('hashchange', render);
   matchMedia('(min-width: 840px)').addEventListener('change', render);
   render();
@@ -1509,6 +1777,7 @@ async function start() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (generateRecurring()) { persist(); render(); }
+    if (IS_NATIVE) importTrips();
     if (Drive.enabled() && (Drive.hasToken() || IS_NATIVE)) Sync.run();
   });
   if (!IS_NATIVE && 'serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.warn);
