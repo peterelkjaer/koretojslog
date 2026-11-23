@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -34,6 +34,12 @@ const TYPES = {
   other:      { label: 'Andet',              icon: '📌', color: '#a16207' },
 };
 const FUELS = ['Benzin', 'Diesel', 'El', 'Hybrid', 'Plug-in hybrid', 'Andet'];
+const KINDS = { car: { label: 'Bil', icon: '🚗' }, mc: { label: 'Motorcykel', icon: '🏍️' }, other: { label: 'Andet', icon: '🚜' } };
+const vIcon = v => (KINDS[v?.kind] || KINDS.car).icon;
+const MONTHS = ['januar', 'februar', 'marts', 'april', 'maj', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'december'];
+const INTERVALS = { month: { m: 1, label: 'Hver måned' }, quarter: { m: 3, label: 'Hvert kvartal' }, half: { m: 6, label: 'Hvert halve år' }, year: { m: 12, label: 'Hvert år' } };
+const TIRE_POS = { front: 'Foran', rear: 'Bag', set: 'Hele sættet' };
+const PART_CATS = ['Filtre', 'Olie og væsker', 'Bremser', 'Tænding', 'Lys og pærer', 'Kæde og transmission', 'Dæk og hjul', 'Elektrisk', 'Andet'];
 const REM_TEMPLATES = [
   { name: 'Olieskift', intervalKm: 15000, intervalMonths: 12 },
   { name: 'Service', intervalKm: 30000, intervalMonths: 24 },
@@ -45,7 +51,7 @@ const REM_TEMPLATES = [
   { name: 'Tændrør', intervalKm: 60000, intervalMonths: 48 },
   { name: 'Dækskifte (sommer/vinter)', intervalKm: null, intervalMonths: 6 },
 ];
-const COLLS = ['vehicles', 'entries', 'readings', 'reminders', 'files'];
+const COLLS = ['vehicles', 'entries', 'readings', 'reminders', 'files', 'recurring', 'tires', 'parts', 'trips'];
 
 /* ---------- Hjælpere ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -121,7 +127,7 @@ const DB = (() => {
 })();
 
 /* ---------- Data ---------- */
-const emptyData = () => ({ schema: 1, vehicles: [], entries: [], readings: [], reminders: [], files: [] });
+const emptyData = () => ({ schema: 1, vehicles: [], entries: [], readings: [], reminders: [], files: [], recurring: [], tires: [], parts: [], trips: [] });
 let data = emptyData();
 const live = c => data[c].filter(x => !x.deleted);
 const byId = (c, id) => data[c].find(x => x.id === id && !x.deleted);
@@ -135,7 +141,7 @@ function softDelete(c, id) { const o = data[c].find(x => x.id === id); if (o && 
 function deleteFilesOf(kind, id) { for (const f of live('files')) if (f.ownerType === kind && f.ownerId === id) softDelete('files', f.id); }
 function deleteVehicle(id) {
   softDelete('vehicles', id); deleteFilesOf('vehicle', id);
-  for (const c of ['entries', 'readings', 'reminders']) for (const x of live(c)) if (x.vehicleId === id) {
+  for (const c of ['entries', 'readings', 'reminders', 'recurring', 'tires', 'parts', 'trips']) for (const x of live(c)) if (x.vehicleId === id) {
     softDelete(c, x.id); if (c === 'entries') deleteFilesOf('entry', x.id); }
 }
 async function persist() { await DB.set('kv', 'data', data); Sync.schedule(); }
@@ -409,7 +415,7 @@ const Sync = {
       const merged = remote ? merge(data, remote) : data;
       if (!remote || sig(merged) !== sig(remote)) await Drive.writeData(merged);
       const fresh = merge(data, merged); // bevar evt. ændringer lavet mens vi synkroniserede
-      if (sig(fresh) !== sig(data)) { data = fresh; await DB.set('kv', 'data', data); render(); }
+      if (sig(fresh) !== sig(data)) { data = fresh; generateRecurring(); await DB.set('kv', 'data', data); render(); }
       localStorage.setItem('lastSync', nowIso());
       this.set('ok');
     } catch (e) {
@@ -604,6 +610,9 @@ function vehicleForm(id) {
       <div class="f"><label>Nummerplade</label><input name="plate" value="${esc(v.plate)}" style="text-transform:uppercase"></div>
       <div class="f"><label>Stelnummer (VIN)</label><input name="vin" value="${esc(v.vin)}"></div>
       <div class="f"><label>Drivmiddel</label><select name="fuel">${FUELS.map(f => `<option ${f === v.fuel ? 'selected' : ''}>${f}</option>`).join('')}</select></div>
+      <div class="f"><label>Type</label><select name="kind">${Object.entries(KINDS).map(([k, t]) => `<option value="${k}" ${k === (v.kind || 'car') ? 'selected' : ''}>${t.icon} ${t.label}</option>`).join('')}</select></div>
+      <div class="f"><label>Tankstørrelse (liter / kWh)</label><input name="tankSize" type="number" step="any" inputmode="decimal" value="${v.tankSize ?? ''}" placeholder="Bruges til rækkevidde"></div>
+      <div class="f full"><label>Sæsonen starter i</label><select name="seasonStart">${MONTHS.map((mn, i) => `<option value="${i + 1}" ${(v.seasonStart || 1) === i + 1 ? 'selected' : ''}>${mn[0].toUpperCase() + mn.slice(1)}${i === 0 ? ' (kalenderår)' : ''}</option>`).join('')}</select></div>
       ${id ? '' : `<div class="f full"><label>Nuværende kilometerstand</label><input name="km" type="number" inputmode="numeric" placeholder="F.eks. 142500"></div>`}
       <div class="f full"><label>Noter (dækstørrelse, olietype, osv.)</label><textarea name="notes">${esc(v.notes)}</textarea></div>
       <div class="f full"><h3 style="margin-top:6px">💰 Køb og salg <span class="muted small" style="font-weight:400">(valgfrit)</span></h3></div>
@@ -621,7 +630,8 @@ function vehicleForm(id) {
     e.preventDefault(); const fd = new FormData(e.target);
     for (const k of ['name', 'make', 'model', 'plate', 'vin', 'fuel', 'notes']) v[k] = (fd.get(k) || '').trim();
     v.plate = v.plate.toUpperCase(); v.year = num(fd.get('year'));
-    for (const k of ['buyPrice', 'buyKm', 'estValue', 'sellPrice', 'sellKm']) v[k] = num(fd.get(k));
+    for (const k of ['buyPrice', 'buyKm', 'estValue', 'sellPrice', 'sellKm', 'tankSize', 'seasonStart']) v[k] = num(fd.get(k));
+    v.kind = fd.get('kind') || 'car';
     v.buyDate = fd.get('buyDate') || null; v.sellDate = fd.get('sellDate') || null;
     if (!v.createdAt) v.createdAt = nowIso();
     upsert('vehicles', v);
@@ -740,6 +750,7 @@ function entryView(id) {
       if (e.cost && e.liters) parts.push(`${fmtDec(e.cost / e.liters, 2)} kr. pr. ${volUnit(e.vehicleId)}`);
       if (e.fullTank === false) parts.push('Delvis tankning');
       return parts.length ? `<p><span class="lbl">Forbrug</span><br>${parts.join(' · ')}</p>` : ''; })() : ''}
+    ${e.recurringId ? `<p class="muted small">🔁 Oprettet automatisk af den faste udgift “${esc(byId('recurring', e.recurringId)?.title || e.title || '')}”.</p>` : ''}
     ${e.workshop ? `<p><span class="lbl">Værksted / sted</span><br>${esc(e.workshop)}</p>` : ''}
     ${rems.length ? `<p><span class="lbl">Udført vedligehold</span><br>${rems.map(esc).join(', ')}</p>` : ''}
     ${e.notes ? `<p><span class="lbl">Noter</span><br>${esc(e.notes).replace(/\n/g, '<br>')}</p>` : ''}
@@ -891,16 +902,17 @@ function renderHome() {
   const upcoming = rems.length ? rems : activeRems.slice(0, 3);
   const recent = live('entries').filter(e => isActiveId(e.vehicleId)).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
   const activeCost = yr => vs.reduce((a, v) => a + yearCost(v.id, yr), 0);
+  const tireWarn = vs.flatMap(v => currentTires(v.id).map(t => ({ t, a: tireAge(t) }))).filter(x => x.a && x.a.level !== 'ok');
   view().innerHTML = storageBanner() + `
     <div class="row no-print" style="margin-bottom:14px"><button class="btn primary" data-act="addEntry">🧾 Udgift / service</button><button class="btn" data-act="addReading">🔢 Kilometerstand</button></div>
     <div class="two-col"><div>
       <h2 style="margin-top:0">Dine køretøjer</h2>
       <div class="grid">${vs.map(v => vehicleCard(v, y)).join('')}</div>
-      <h2>Seneste registreringer</h2>
-      <div class="list">${recent.length ? recent.map(e => entryItem(e, true)).join('') : '<p class="muted">Ingen endnu.</p>'}</div>
+      <h2>${rems.length || tireWarn.length ? 'Kræver opmærksomhed' : 'Kommende vedligehold'}</h2>
+      <div class="list">${tireWarn.map(x => tireWarnItem(x)).join('')}${upcoming.length ? upcoming.map(x => remItem(x.r, x.s, vs.length > 1)).join('') : (tireWarn.length ? '' : '<p class="muted small">Ingen påmindelser oprettet. Åbn et køretøj og tilføj f.eks. olieskift.</p>')}</div>
     </div><div>
-      <h2 style="margin-top:0">${rems.length ? 'Kræver opmærksomhed' : 'Kommende vedligehold'}</h2>
-      <div class="list">${upcoming.length ? upcoming.map(x => remItem(x.r, x.s, vs.length > 1)).join('') : '<p class="muted small">Ingen påmindelser oprettet. Åbn et køretøj og tilføj f.eks. olieskift.</p>'}</div>
+      <h2 style="margin-top:0">Seneste registreringer</h2>
+      <div class="list">${recent.length ? recent.map(e => entryItem(e, true)).join('') : '<p class="muted">Ingen endnu.</p>'}</div>
       <h2>Udgifter ${y}</h2>
       <div class="kpis"><div class="kpi"><div class="l">I alt</div><div class="v">${fmtKr(activeCost(y))}</div></div>
       <div class="kpi"><div class="l">Sidste år</div><div class="v">${fmtKr(activeCost(String(y - 1)))}</div></div></div>
@@ -909,10 +921,11 @@ function renderHome() {
 function vehicleCard(v, y) {
   const top = sortedReminders(v.id)[0]; const km = currentKm(v.id); const lk = lastKmDate(v.id);
   return `<div class="card click" data-act="goVehicle" data-id="${v.id}">
-    <div class="row between"><h3>${esc(v.name)}</h3><span>${v.sellDate || v.sellPrice != null ? '<span class="badge b-soon">Solgt</span> ' : ''}${v.plate ? `<span class="badge b-unknown">${esc(v.plate)}</span>` : ''}</span></div>
+    <div class="row between"><h3>${vIcon(v)} ${esc(v.name)}</h3><span>${v.sellDate || v.sellPrice != null ? '<span class="badge b-soon">Solgt</span> ' : ''}${v.plate ? `<span class="badge b-unknown">${esc(v.plate)}</span>` : ''}</span></div>
     <div class="muted small">${esc([v.make, v.model, v.year].filter(Boolean).join(' '))}</div>
     <div class="row between" style="margin-top:8px"><span class="big-km">${fmtKm(km)}</span><span class="muted small">${lk ? 'pr. ' + fmtDate(lk) : ''}</span></div>
     ${top ? `<div class="small" style="margin-top:6px"><span class="badge b-${top.s.level}">${esc(top.r.name)}</span> <span class="muted">${remText(top.s).split(' · ')[0] || ''}</span></div>` : ''}
+    ${rangeLine(v.id)}
     <div class="muted small" style="margin-top:6px">Udgifter i år: <b>${fmtKr(yearCost(v.id, y))}</b></div></div>`;
 }
 function entryItem(e, showVehicle) {
@@ -945,12 +958,14 @@ function renderVehicle(id) {
   let tab = vTab[id] || 'history';
   if (wide && (tab === 'reminders' || tab === 'docs')) tab = 'history';
   const km = currentKm(id); const kpd = kmPerDay(id); const y = today().slice(0, 4);
-  const tabs = wide ? [['history', 'Historik'], ['km', 'Kilometer']] : [['history', 'Historik'], ['reminders', 'Vedligehold'], ['km', 'Km'], ['docs', 'Dokumenter']];
-  const panel = { history: historyPanel(v), km: kmPanel(v), reminders: remindersPanel(v), docs: docsPanel(v) };
+  const tabs = wide ? [['history', 'Historik'], ['km', 'Kilometer'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter']]
+    : [['history', 'Historik'], ['reminders', 'Vedligehold'], ['km', 'Km'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter'], ['docs', 'Dokumenter']];
+  const panel = { history: historyPanel(v), km: kmPanel(v), reminders: remindersPanel(v), docs: docsPanel(v),
+    tires: tiresPanel(v), parts: partsPanel(v), recurring: recurringPanel(v) };
   view().innerHTML = `
     <div class="card">
       <div class="row between"><div><div class="muted small">${esc([v.make, v.model, v.year, v.fuel].filter(Boolean).join(' · '))}${v.plate ? ' · <b>' + esc(v.plate) + '</b>' : ''}</div>
-        <div class="big-km">${fmtKm(km)}</div><div class="muted small">${kpd ? `ca. ${fmtNum(kpd * 365)} km/år` : 'Registrér km jævnligt for at beregne forventet kørsel'}</div></div>
+        <div class="big-km">${fmtKm(km)}</div><div class="muted small">${kpd ? `ca. ${fmtNum(kpd * 365)} km/år` : 'Registrér km jævnligt for at beregne forventet kørsel'}</div>${rangeLine(id)}</div>
         <div class="row no-print"><button class="btn" data-act="addReading" data-id="${id}">🔢 Km</button><button class="btn primary" data-act="addEntry" data-id="${id}">🧾 Registrér</button><button class="btn" data-act="editVehicle" data-id="${id}" aria-label="Rediger">✏️</button></div></div>
       <div class="kpis" style="margin-top:12px">
         <div class="kpi"><div class="l">Udgifter i år</div><div class="v">${fmtKr(yearCost(id, y))}</div></div>
@@ -968,6 +983,7 @@ function renderVehicle(id) {
       <div id="vpanel">${panel[tab]}</div>
     </div>${wide ? `<div><h2>Vedligehold</h2>${panel.reminders}<h2>Dokumenter og manualer</h2>${panel.docs}</div>` : ''}</div>`;
   const s = $('#hsearch'); if (s) { s.oninput = () => { vSearch[id] = s.value; $('#hlist').innerHTML = historyList(v); }; }
+  const ps = $('#psearch'); if (ps) { ps.oninput = () => { pSearch[id] = ps.value; $('#plist').innerHTML = partsList(v); }; }
 }
 function historyList(v) {
   const q = (vSearch[v.id] || '').toLowerCase();
@@ -1120,7 +1136,7 @@ function renderReports() {
         <td class="nowrap">${TYPES[e.type]?.icon || ''} ${TYPES[e.type]?.label || ''}</td><td>${esc(entryTitle(e))}${filesOf('entry', e.id).length ? ' 📎' : ''}</td>
         <td class="n">${e.km != null ? fmtNum(e.km) : ''}</td><td class="n">${e.cost != null ? fmtKr2(e.cost) : ''}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">Ingen registreringer i perioden.</td></tr>`}
       ${es.length ? `<tr><td colspan="${rf.vehicle ? 4 : 5}"><b>I alt</b></td><td class="n"><b>${fmtKr2(total)}</b></td></tr>` : ''}</table></div>
-    ${rf.vehicle ? fuelTable(rf.vehicle, from, to) + serviceSummary(rf.vehicle) : ''}`;
+    ${rf.vehicle ? seasonTable(rf.vehicle) + fuelTable(rf.vehicle, from, to) + serviceSummary(rf.vehicle) : ''}`;
   $('#rVeh').onchange = e => { rf.vehicle = e.target.value; render(); };
   $('#rPer').onchange = e => { rf.period = e.target.value; render(); };
   $('#rFrom') && ($('#rFrom').onchange = e => { rf.from = e.target.value; render(); });
@@ -1207,6 +1223,235 @@ function renderSettings() {
   };
 }
 
+/* ---------- Gentagne (faste) udgifter ---------- */
+// Hver betaling får et fast id (rec_<id>_<dato>), så to enheder aldrig opretter den samme betaling to gange.
+function recurringDates(r, until) {
+  const out = []; const step = INTERVALS[r.interval]?.m || 12;
+  for (let i = 0; i < 600; i++) {
+    const d = addMonths(r.startDate, step * i);
+    if (d > until || (r.endDate && d > r.endDate)) break;
+    out.push(d);
+  }
+  return out;
+}
+function nextRecurring(r) {
+  if (r.paused) return null;
+  const step = INTERVALS[r.interval]?.m || 12; const t = today();
+  for (let i = 0; i < 600; i++) { const d = addMonths(r.startDate, step * i); if (r.endDate && d > r.endDate) return null; if (d > t) return d; }
+  return null;
+}
+function generateRecurring() {
+  let changed = false; const ids = new Set(data.entries.map(e => e.id));
+  for (const r of live('recurring')) {
+    if (r.paused || !r.startDate) continue;
+    const v = byId('vehicles', r.vehicleId); if (!v) continue;
+    let until = today(); if (v.sellDate && v.sellDate < until) until = v.sellDate;
+    for (const d of recurringDates(r, until)) {
+      const id = `rec_${r.id}_${d}`; if (ids.has(id)) continue;
+      const e = { id, vehicleId: r.vehicleId, type: r.type, title: r.title, date: d, cost: r.amount, km: null, recurringId: r.id, reminderIds: [], createdAt: nowIso() };
+      upsert('entries', e); ids.add(id); changed = true;
+    }
+  }
+  return changed;
+}
+function recurringPanel(v) {
+  const rs = live('recurring').filter(r => r.vehicleId === v.id).sort((a, b) => (nextRecurring(a) || '9').localeCompare(nextRecurring(b) || '9'));
+  const perYear = rs.filter(r => !r.paused && (!r.endDate || r.endDate >= today())).reduce((a, r) => a + (r.amount || 0) * 12 / (INTERVALS[r.interval]?.m || 12), 0);
+  return `${rs.length ? `<p class="muted small" style="margin-top:0">Faste udgifter i alt: <b>${fmtKr(perYear)}</b> pr. år (${fmtKr(perYear / 12)} pr. måned).</p>` : ''}
+    <div class="list">${rs.map(r => { const t = TYPES[r.type] || TYPES.other; const nx = nextRecurring(r);
+      return `<div class="item" data-act="editRecurring" data-id="${r.id}"><div class="ic">${t.icon}</div>
+        <div class="body"><div class="t">${esc(r.title || t.label)}</div>
+        <div class="s">${INTERVALS[r.interval]?.label || ''} · ${r.paused ? 'stoppet' : nx ? 'næste ' + fmtDate(nx) : 'afsluttet'}</div></div>
+        <div class="amt">${fmtKr(r.amount)}</div></div>`; }).join('') || '<p class="muted small">Opret f.eks. forsikring eller vægtafgift én gang, så registreres betalingerne selv på betalingsdatoen.</p>'}</div>
+    <div class="row" style="margin-top:10px"><button class="btn" data-act="addRecurring" data-id="${v.id}">＋ Tilføj fast udgift</button></div>`;
+}
+function recurringForm(vid, rid) {
+  const r = rid ? { ...byId('recurring', rid) } : { id: uid(), vehicleId: vid, type: 'insurance', title: '', amount: null, interval: 'year', startDate: today(), endDate: null, paused: false };
+  const generated = rid ? live('entries').filter(e => e.recurringId === rid).length : 0;
+  const m = modal(rid ? 'Rediger fast udgift' : 'Ny fast udgift', `<form>
+    <div class="fgrid">
+      <div class="f full"><label>Beskrivelse *</label><input name="title" required value="${esc(r.title)}" placeholder="F.eks. Kaskoforsikring, Vægtafgift"></div>
+      <div class="f"><label>Kategori</label><select name="type">${Object.entries(TYPES).filter(([k]) => k !== 'fuel').map(([k, t]) => `<option value="${k}" ${k === r.type ? 'selected' : ''}>${t.icon} ${t.label}</option>`).join('')}</select></div>
+      <div class="f"><label>Beløb pr. betaling (kr.) *</label><input name="amount" type="number" step="any" inputmode="decimal" required value="${r.amount ?? ''}"></div>
+      <div class="f"><label>Gentages</label><select name="interval">${Object.entries(INTERVALS).map(([k, x]) => `<option value="${k}" ${k === r.interval ? 'selected' : ''}>${x.label}</option>`).join('')}</select></div>
+      <div class="f"><label>${rid ? 'Første betaling' : 'Første betalingsdato *'}</label><input name="startDate" type="date" required value="${esc(r.startDate)}" ${rid ? 'disabled' : ''}></div>
+      <div class="f"><label>Slutdato (valgfri)</label><input name="endDate" type="date" value="${esc(r.endDate || '')}"></div>
+      <div class="f"><label class="check" style="font-weight:400;color:var(--fg);margin-top:22px"><input type="checkbox" name="paused" ${r.paused ? 'checked' : ''}> Stoppet</label></div>
+    </div>
+    <p class="muted small">${rid ? `${generated} betaling(er) er registreret indtil nu. Ændrer du beløbet, gælder det kun kommende betalinger.`
+      : 'Hver betaling registreres automatisk på sin betalingsdato. Ligger første betaling tilbage i tiden, registreres betalingerne frem til i dag med det samme.'}</p>
+    <div class="modal-actions">${rid ? '<button type="button" class="btn danger" data-del>Slet</button><span class="spacer"></span>' : ''}
+      <button type="button" class="btn" data-close>Annuller</button><button class="btn primary">Gem</button></div></form>`);
+  const form = $('form', m);
+  form.onsubmit = async ev => {
+    ev.preventDefault(); const fd = new FormData(form);
+    r.title = fd.get('title').trim(); r.type = fd.get('type'); r.amount = num(fd.get('amount')); r.interval = fd.get('interval');
+    if (!rid) r.startDate = fd.get('startDate'); r.endDate = fd.get('endDate') || null; r.paused = fd.get('paused') === 'on';
+    upsert('recurring', r); const n0 = data.entries.length; generateRecurring(); const added = live('entries').filter(e => e.recurringId === r.id).length - generated;
+    await persist(); await closeLayer(); render(); toast(added > 0 && !rid ? `Gemt · ${added} betaling(er) registreret` : 'Gemt');
+  };
+  $('[data-del]', m)?.addEventListener('click', async () => {
+    if (!confirm(`Slet den faste udgift "${r.title}"? Allerede registrerede betalinger bevares i historikken.`)) return;
+    softDelete('recurring', rid); await persist(); await closeLayer(); render();
+  });
+}
+
+/* ---------- Dæklog ---------- */
+const currentTires = vid => live('tires').filter(t => t.vehicleId === vid && !t.removeDate).sort((a, b) => a.position.localeCompare(b.position));
+function tireAge(t) {
+  const m = /^(\d{2})(\d{2})$/.exec(String(t.dot || '').trim()); if (!m) return null;
+  const week = +m[1], year = 2000 + +m[2]; if (week < 1 || week > 53) return null;
+  const made = new Date(year, 0, 1 + (week - 1) * 7); const years = (Date.now() - made) / (365.25 * 864e5);
+  return { years, made, level: years >= 6 ? 'overdue' : years >= 5 ? 'soon' : 'ok' };
+}
+const fmtYears = y => y.toLocaleString('da-DK', { maximumFractionDigits: 1 }) + ' år';
+function tireKm(t) { const end = t.removeKm ?? currentKm(t.vehicleId); return t.mountKm != null && end != null && end >= t.mountKm ? end - t.mountKm : null; }
+function tireWarnItem({ t, a }) {
+  return `<div class="item rem ${a.level}" data-act="goVehicleTab" data-id="${t.vehicleId}" data-tab="tires"><div class="body">
+    <div class="row between"><span class="t">Dæk ${TIRE_POS[t.position].toLowerCase()} <span class="muted small">· ${esc(vehicleName(t.vehicleId))}</span></span><span class="badge b-${a.level}">${fmtYears(a.years)}</span></div>
+    <div class="s">${esc([t.brand, t.model].filter(Boolean).join(' '))} · DOT ${esc(t.dot)} · ${a.level === 'overdue' ? 'over 6 år – bør skiftes' : 'over 5 år – hold øje med revner'}</div></div></div>`;
+}
+function tiresPanel(v) {
+  const cur = currentTires(v.id);
+  const old = live('tires').filter(t => t.vehicleId === v.id && t.removeDate).sort((a, b) => b.removeDate.localeCompare(a.removeDate));
+  const card = t => { const a = tireAge(t); const km = tireKm(t);
+    return `<div class="card click" data-act="editTire" data-id="${t.id}" style="margin-bottom:10px">
+      <div class="row between"><h3>${TIRE_POS[t.position]}</h3>${a ? `<span class="badge b-${a.level}">${fmtYears(a.years)} gammelt</span>` : ''}</div>
+      <div>${esc([t.brand, t.model].filter(Boolean).join(' ') || 'Ukendt dæk')}${t.size ? ` <span class="muted small">· ${esc(t.size)}</span>` : ''}</div>
+      <div class="muted small">Monteret ${fmtDate(t.mountDate)}${t.mountKm != null ? ' ved ' + fmtKm(t.mountKm) : ''}${km != null ? ` · kørt <b>${fmtKm(km)}</b>` : ''}${t.dot ? ' · DOT ' + esc(t.dot) : ''}</div>
+      <div class="row" style="margin-top:8px"><button class="btn sm" data-act="changeTire" data-id="${t.id}">🔄 Skift dæk</button></div></div>`; };
+  return `${cur.length ? cur.map(card).join('') : '<p class="muted small">Registrér de dæk, der sidder på nu. Med DOT-koden (4 cifre, uge og år) holder appen øje med dækkenes alder.</p>'}
+    <div class="row" style="margin:4px 0 6px"><button class="btn" data-act="addTire" data-id="${v.id}">＋ Registrér dæk</button></div>
+    ${old.length ? `<h3 style="margin-top:16px">Tidligere dæk</h3><div class="card scroll-x" style="margin-top:8px"><table class="t"><tr><th>Position</th><th>Dæk</th><th>Periode</th><th class="n">Kørt</th><th class="n">Pr. 1.000 km</th></tr>
+      ${old.map(t => { const km = tireKm(t); return `<tr data-act="editTire" data-id="${t.id}" style="cursor:pointer"><td>${TIRE_POS[t.position]}</td><td>${esc([t.brand, t.model].filter(Boolean).join(' '))}</td>
+        <td class="nowrap">${fmtDate(t.mountDate)} – ${fmtDate(t.removeDate)}</td><td class="n">${km != null ? fmtKm(km) : ''}</td><td class="n">${km && t.price ? fmtKr(t.price / km * 1000) : ''}</td></tr>`; }).join('')}</table></div>` : ''}`;
+}
+function tireForm(vid, tid, replacing) {
+  const v = byId('vehicles', vid || byId('tires', tid)?.vehicleId);
+  const t = tid ? { ...byId('tires', tid) } : { id: uid(), vehicleId: v.id, position: replacing?.position || (v.kind === 'mc' ? 'front' : 'set'),
+    brand: replacing?.brand || '', model: replacing?.model || '', size: replacing?.size || '', dot: '', price: null, mountDate: today(), mountKm: currentKm(v.id), removeDate: null, removeKm: null, notes: '' };
+  const m = modal(tid ? 'Rediger dæk' : replacing ? `Skift dæk – ${TIRE_POS[replacing.position].toLowerCase()}` : 'Registrér dæk', `<form>
+    <div class="fgrid">
+      <div class="f"><label>Position</label><select name="position" ${replacing ? 'disabled' : ''}>${Object.entries(TIRE_POS).map(([k, l]) => `<option value="${k}" ${k === t.position ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="f"><label>Størrelse</label><input name="size" value="${esc(t.size)}" placeholder="F.eks. 120/70 ZR17"></div>
+      <div class="f"><label>Mærke</label><input name="brand" value="${esc(t.brand)}" placeholder="F.eks. Michelin"></div>
+      <div class="f"><label>Model</label><input name="model" value="${esc(t.model)}" placeholder="F.eks. Road 6"></div>
+      <div class="f"><label>DOT (uge + år, 4 cifre)</label><input name="dot" value="${esc(t.dot)}" inputmode="numeric" maxlength="4" placeholder="F.eks. 2324"></div>
+      <div class="f"><label>Pris (kr.)</label><input name="price" type="number" step="any" inputmode="decimal" value="${t.price ?? ''}"></div>
+      <div class="f"><label>Monteret dato</label><input name="mountDate" type="date" required value="${esc(t.mountDate)}"></div>
+      <div class="f"><label>Monteret ved km</label><input name="mountKm" type="number" inputmode="numeric" value="${t.mountKm ?? ''}"></div>
+      ${tid ? `<div class="f"><label>Afmonteret dato</label><input name="removeDate" type="date" value="${esc(t.removeDate || '')}"></div>
+      <div class="f"><label>Afmonteret ved km</label><input name="removeKm" type="number" inputmode="numeric" value="${t.removeKm ?? ''}"></div>` : ''}
+      <div class="f full"><label>Noter</label><input name="notes" value="${esc(t.notes)}" placeholder="F.eks. dæktryk 2,5/2,9 bar, slid"></div>
+      ${tid ? '' : `<div class="f full"><label class="check" style="font-weight:400;color:var(--fg)"><input type="checkbox" name="asExpense" checked> Registrér også prisen som udgift (kategori Dæk)</label></div>`}
+    </div>
+    ${replacing ? `<p class="muted small">Det gamle dæk (${esc([replacing.brand, replacing.model].filter(Boolean).join(' ') || TIRE_POS[replacing.position])}) bliver flyttet til “Tidligere dæk” med den nye monteringsdato og km.</p>` : ''}
+    <div class="modal-actions">${tid ? '<button type="button" class="btn danger" data-del>Slet</button><span class="spacer"></span>' : ''}
+      <button type="button" class="btn" data-close>Annuller</button><button class="btn primary">Gem</button></div></form>`);
+  const form = $('form', m);
+  form.onsubmit = async ev => {
+    ev.preventDefault(); const fd = new FormData(form);
+    if (!replacing) t.position = fd.get('position');
+    for (const k of ['size', 'brand', 'model', 'dot', 'notes']) t[k] = (fd.get(k) || '').trim();
+    if (t.dot && !/^\d{4}$/.test(t.dot)) { toast('DOT skal være 4 cifre: uge og år, f.eks. 2324'); return; }
+    t.price = num(fd.get('price')); t.mountDate = fd.get('mountDate'); t.mountKm = num(fd.get('mountKm'));
+    if (tid) { t.removeDate = fd.get('removeDate') || null; t.removeKm = num(fd.get('removeKm')); }
+    if (replacing) upsert('tires', { ...byId('tires', replacing.id), removeDate: t.mountDate, removeKm: t.mountKm });
+    else if (!tid) for (const o of currentTires(t.vehicleId)) if (o.position === t.position || o.position === 'set' || t.position === 'set')
+      if (confirm(`Skal "${[o.brand, o.model].filter(Boolean).join(' ') || TIRE_POS[o.position]}" (${TIRE_POS[o.position].toLowerCase()}) markeres som afmonteret?`)) upsert('tires', { ...o, removeDate: t.mountDate, removeKm: t.mountKm });
+    upsert('tires', t);
+    if (!tid && fd.get('asExpense') === 'on' && t.price) upsert('entries', { id: uid(), vehicleId: t.vehicleId, type: 'tires', date: t.mountDate, km: t.mountKm,
+      cost: t.price, title: `Dæk ${TIRE_POS[t.position].toLowerCase()}: ${[t.brand, t.model].filter(Boolean).join(' ')}`.trim(), reminderIds: [], createdAt: nowIso() });
+    await persist(); await closeLayer(); render(); toast('Gemt');
+  };
+  $('[data-del]', m)?.addEventListener('click', async () => { if (!confirm('Slet dette dæk fra dæklogen?')) return; softDelete('tires', tid); await persist(); await closeLayer(); render(); });
+}
+
+/* ---------- Reservedele ---------- */
+const pSearch = {};
+function partsList(v) {
+  const q = (pSearch[v.id] || '').toLowerCase();
+  const ps = live('parts').filter(p => p.vehicleId === v.id && (!q || [p.name, p.partNo, p.altNo, p.spec, p.supplier, p.notes, p.category].join(' ').toLowerCase().includes(q)));
+  if (!ps.length) return `<p class="muted small">${q ? 'Intet matcher søgningen.' : 'Gem varenumre og specifikationer, f.eks. oliefilter, olietype og -mængde, tændrør, pærer og bremseklodser.'}</p>`;
+  return PART_CATS.filter(c => ps.some(p => (p.category || 'Andet') === c)).map(c => `<div class="year-h"><span>${c}</span></div><div class="list">` +
+    ps.filter(p => (p.category || 'Andet') === c).sort((a, b) => a.name.localeCompare(b.name, 'da')).map(p => `<div class="item" data-act="editPart" data-id="${p.id}">
+      <div class="body"><div class="t">${esc(p.name)}</div>
+      <div class="s">${p.partNo ? `Varenr. <b>${esc(p.partNo)}</b>` : ''}${p.altNo ? ` · alt. ${esc(p.altNo)}` : ''}${p.spec ? ` · ${esc(p.spec)}` : ''}${p.supplier ? ` · ${esc(p.supplier)}` : ''}</div></div>
+      <div class="amt">${p.price != null ? fmtKr(p.price) : ''}</div></div>`).join('') + '</div>').join('');
+}
+function partsPanel(v) {
+  return `<input id="psearch" type="search" placeholder="Søg i reservedele …" value="${esc(pSearch[v.id] || '')}" style="margin-bottom:6px"><div id="plist">${partsList(v)}</div>
+    <div class="row" style="margin-top:10px"><button class="btn" data-act="addPart" data-id="${v.id}">＋ Tilføj reservedel</button></div>`;
+}
+function partForm(vid, pid) {
+  const p = pid ? { ...byId('parts', pid) } : { id: uid(), vehicleId: vid, category: 'Filtre', name: '', partNo: '', altNo: '', spec: '', supplier: '', url: '', price: null, notes: '' };
+  const m = modal(pid ? 'Rediger reservedel' : 'Ny reservedel', `<form>
+    <div class="fgrid">
+      <div class="f full"><label>Navn *</label><input name="name" required value="${esc(p.name)}" placeholder="F.eks. Oliefilter"></div>
+      <div class="f"><label>Kategori</label><select name="category">${PART_CATS.map(c => `<option ${c === p.category ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+      <div class="f"><label>Specifikation</label><input name="spec" value="${esc(p.spec)}" placeholder="F.eks. 3,8 L 10W-40"></div>
+      <div class="f"><label>Varenummer (original)</label><input name="partNo" value="${esc(p.partNo)}"></div>
+      <div class="f"><label>Alternativt varenummer</label><input name="altNo" value="${esc(p.altNo)}" placeholder="F.eks. HF204"></div>
+      <div class="f"><label>Forhandler</label><input name="supplier" value="${esc(p.supplier)}"></div>
+      <div class="f"><label>Seneste pris (kr.)</label><input name="price" type="number" step="any" inputmode="decimal" value="${p.price ?? ''}"></div>
+      <div class="f full"><label>Link</label><input name="url" type="url" value="${esc(p.url)}" placeholder="https://…"></div>
+      <div class="f full"><label>Noter</label><input name="notes" value="${esc(p.notes)}"></div>
+    </div>
+    ${p.url ? `<p class="small"><a href="${esc(p.url)}" target="_blank" rel="noopener">Åbn link ↗</a></p>` : ''}
+    <div class="modal-actions">${pid ? '<button type="button" class="btn danger" data-del>Slet</button><span class="spacer"></span>' : ''}
+      <button type="button" class="btn" data-close>Annuller</button><button class="btn primary">Gem</button></div></form>`);
+  const form = $('form', m);
+  form.onsubmit = async ev => {
+    ev.preventDefault(); const fd = new FormData(form);
+    for (const k of ['name', 'category', 'spec', 'partNo', 'altNo', 'supplier', 'url', 'notes']) p[k] = (fd.get(k) || '').trim();
+    p.price = num(fd.get('price')); upsert('parts', p); await persist(); await closeLayer(); render(); toast('Gemt');
+  };
+  $('[data-del]', m)?.addEventListener('click', async () => { if (!confirm(`Slet "${p.name}"?`)) return; softDelete('parts', pid); await persist(); await closeLayer(); render(); });
+}
+
+/* ---------- Rækkevidde ---------- */
+function fuelRange(vid) {
+  const v = byId('vehicles', vid); if (!v?.tankSize) return null;
+  const segs = (fuelSegs().byVehicle[vid] || []).slice(-5); if (!segs.length) return null;
+  const kml = segs.reduce((a, s) => a + s.km, 0) / segs.reduce((a, s) => a + s.liters, 0);
+  const fills = live('entries').filter(e => e.vehicleId === vid && e.type === 'fuel' && e.km != null).sort((a, b) => b.km - a.km || b.date.localeCompare(a.date));
+  const lastFull = fills.find(e => e.fullTank !== false); if (!lastFull) return null;
+  const partial = fills.filter(e => e.fullTank === false && e.km > lastFull.km).reduce((a, e) => a + (e.liters || 0), 0);
+  const cur = currentKm(vid) ?? lastFull.km; const since = Math.max(0, cur - lastFull.km);
+  const fuelLeft = Math.min(v.tankSize, v.tankSize - since / kml + partial);
+  const range = Math.max(0, fuelLeft * kml);
+  return { range, kml, since, level: range < 50 ? 'overdue' : range < 100 ? 'soon' : 'ok', asOf: lastKmDate(vid) };
+}
+function rangeLine(vid) {
+  const r = fuelRange(vid); if (!r) return '';
+  return `<div class="small" style="margin-top:6px">⛽ <span class="badge b-${r.level}">ca. ${fmtNum(Math.round(r.range / 5) * 5)} km til tom</span> <span class="muted">${fmtKm(r.since)} siden fuld tank</span></div>`;
+}
+
+/* ---------- Statistik pr. sæson ---------- */
+function seasonTable(vid) {
+  const v = byId('vehicles', vid); const sm = v.seasonStart || 1;
+  const dates = [...kmPoints(vid).map(p => p.date), ...live('entries').filter(e => e.vehicleId === vid).map(e => e.date)].sort();
+  if (!dates.length) return '';
+  const t = today(); let y = +dates[0].slice(0, 4); if (dates[0].slice(5, 7) < String(sm).padStart(2, '0')) y--;
+  const rows = [];
+  for (; ; y++) {
+    const from = `${y}-${String(sm).padStart(2, '0')}-01`; if (from > t) break;
+    const to = addDays(addMonths(from, 12), -1);
+    const es = live('entries').filter(e => e.vehicleId === vid && e.date >= from && e.date <= to);
+    const cost = es.reduce((a, e) => a + (e.cost || 0), 0); const km = kmDriven(vid, from, to);
+    const trips = live('trips').filter(x => x.vehicleId === vid && x.date >= from && x.date <= to);
+    const longest = trips.reduce((a, x) => Math.max(a, x.km || 0), 0); const fuel = avgKml(vid, from, to);
+    rows.push({ label: sm === 1 ? String(y) : `${y}/${String(y + 1).slice(2)}`, cost, km, trips: trips.length, longest, fuel, current: to >= t });
+  }
+  const hasTrips = rows.some(r => r.trips);
+  return `<h2>Sæsoner <span class="muted small">(sæsonen starter i ${MONTHS[sm - 1]})</span></h2>
+    <div class="card scroll-x"><table class="t"><tr><th>Sæson</th><th class="n">Kørt</th>${hasTrips ? '<th class="n">Ture</th><th class="n">Længste</th>' : ''}<th class="n">Forbrug</th><th class="n">Udgifter</th><th class="n">Pr. km</th></tr>
+    ${rows.reverse().map(r => `<tr><td class="nowrap">${r.label}${r.current ? ' <span class="muted small">(i gang)</span>' : ''}</td><td class="n">${r.km ? fmtKm(r.km) : '–'}</td>
+      ${hasTrips ? `<td class="n">${r.trips || ''}</td><td class="n">${r.longest ? fmtKm(r.longest) : ''}</td>` : ''}
+      <td class="n">${r.fuel ? fmtDec(r.fuel.kml) + ' ' + fuelUnit(vid) : ''}</td><td class="n">${fmtKr(r.cost)}</td><td class="n">${r.km ? fmtKr2(r.cost / r.km) : '–'}</td></tr>`).join('')}</table></div>
+    <p class="muted small">En sæson regnes fra 1. ${MONTHS[sm - 1]} og 12 måneder frem, så vinterens forsikring og afgifter tæller med. Startmåneden ændres under køretøjet (✏️).</p>`;
+}
+
 /* ---------- Handlinger ---------- */
 function doPrint() {
   if (IS_NATIVE) return NH.print({ name: 'Køretøjslog ' + today() }).catch(e => toast(e.message));
@@ -1217,6 +1462,7 @@ const ACT = {
   addVehicle: () => vehicleForm(),
   editVehicle: d => vehicleForm(d.id),
   goVehicle: d => { location.hash = '#/v/' + d.id; },
+  goVehicleTab: d => { vTab[d.id] = d.tab; location.hash = '#/v/' + d.id; },
   addEntry: d => entryForm(null, { vehicleId: d.id }),
   viewEntry: d => entryView(d.id),
   addReading: d => readingForm(d.id),
@@ -1231,6 +1477,9 @@ const ACT = {
   rCat: d => { rf.cats.has(d.id) ? rf.cats.delete(d.id) : rf.cats.add(d.id); render(); },
   rCatAll: () => { rf.cats = rf.cats.size === Object.keys(TYPES).length ? new Set() : new Set(Object.keys(TYPES)); render(); },
   exportCsv: () => exportCsv(),
+  addRecurring: d => recurringForm(d.id), editRecurring: d => recurringForm(null, d.id),
+  addTire: d => tireForm(d.id), editTire: d => tireForm(null, d.id), changeTire: d => { const t = byId('tires', d.id); tireForm(t.vehicleId, null, t); },
+  addPart: d => partForm(d.id), editPart: d => partForm(null, d.id),
   theme: d => { setTheme(d.id); render(); },
   toggleTheme: () => { setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); if (currentRoute().name === 'settings') render(); },
   print: () => doPrint(),
@@ -1252,11 +1501,16 @@ document.addEventListener('click', e => {
 async function start() {
   applyTheme();
   try { const d = await DB.get('kv', 'data'); if (d) data = merge(emptyData(), d); } catch (e) { console.error(e); toast('Kunne ikke læse lokale data'); }
+  if (generateRecurring()) persist();
   window.addEventListener('hashchange', render);
   matchMedia('(min-width: 840px)').addEventListener('change', render);
   render();
   if (Drive.enabled()) { Sync.run(); } else Sync.set('local');
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Drive.enabled() && (Drive.hasToken() || IS_NATIVE)) Sync.run(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (generateRecurring()) { persist(); render(); }
+    if (Drive.enabled() && (Drive.hasToken() || IS_NATIVE)) Sync.run();
+  });
   if (!IS_NATIVE && 'serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.warn);
 }
 start();
