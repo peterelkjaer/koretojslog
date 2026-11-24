@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -144,7 +144,25 @@ function deleteVehicle(id) {
   for (const c of ['entries', 'readings', 'reminders', 'recurring', 'tires', 'parts', 'trips']) for (const x of live(c)) if (x.vehicleId === id) {
     softDelete(c, x.id); if (c === 'entries') deleteFilesOf('entry', x.id); }
 }
-async function persist() { await DB.set('kv', 'data', data); Sync.schedule(); }
+async function persist() { await DB.set('kv', 'data', data); Sync.schedule(); pushCarDataSoon(); }
+/* Øjebliksbillede til Android Auto-skærmen (kun i Android-appen) */
+let carTimer = null;
+function pushCarDataSoon() { if (!IS_NATIVE) return; clearTimeout(carTimer); carTimer = setTimeout(pushCarData, 800); }
+function pushCarData() {
+  if (!IS_NATIVE || !NH || !NH.setCarData) return;
+  try {
+    segCache = null;
+    const vehicles = activeVehicles().map(v => {
+      const r = fuelRange(v.id);
+      return { id: v.id, name: v.name, address: (v.btAddress || '').toUpperCase(), manual: ('MANUAL-' + v.id).toUpperCase(),
+        km: currentKm(v.id), factor: v.kmFactor || 1, range: r ? r.range : null,
+        reminders: sortedReminders(v.id).filter(x => x.s.level !== 'unknown').map(x => ({ nextKm: x.s.nextKm, nextDate: x.s.nextDate })) };
+    });
+    const json = JSON.stringify({ updated: Date.now(), warnKm: +(localStorage.getItem('aaWarnKm') || 1000), warnDays: +(localStorage.getItem('aaWarnDays') || 30),
+      speedLimit: localStorage.getItem('aaSpeedLimit') !== '0', vehicles });
+    Promise.resolve(NH.setCarData({ json })).catch(() => {});
+  } catch (e) { console.warn('pushCarData', e); }
+}
 
 function merge(a, b) {
   const out = emptyData();
@@ -1210,6 +1228,19 @@ function renderSettings() {
         <button class="btn danger" data-act="disconnect">Afbryd</button></div>`
       : `<button class="btn primary" data-act="connect">Forbind Google Drive</button>`}
     </div>
+    ${IS_NATIVE ? `<div class="card" style="margin-top:14px"><h3>🚘 Android Auto</h3>
+      <p class="muted small">Køreskærmen viser hastighed, hastighedsgrænse, tur, kilometerstand og rækkevidde for det køretøj, telefonen er forbundet til.</p>
+      <div class="fgrid">
+        <div class="f"><label class="lbl">Servicelampe: km før</label><input id="aaWarnKm" type="number" inputmode="numeric" value="${esc(localStorage.getItem('aaWarnKm') || 1000)}"></div>
+        <div class="f"><label class="lbl">Servicelampe: dage før</label><input id="aaWarnDays" type="number" inputmode="numeric" value="${esc(localStorage.getItem('aaWarnDays') || 30)}"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="aaSpeedLimit" ${localStorage.getItem('aaSpeedLimit') !== '0' ? 'checked' : ''}> Vis hastighedsgrænse (OpenStreetMap)</label>
+      <details style="margin-top:6px"><summary class="small">Sådan får du appen frem i Android Auto</summary><ol class="small" style="margin:6px 0 0;padding-left:20px">
+        <li>Åbn Android Auto-indstillingerne på telefonen (Indstillinger → søg “Android Auto”).</li>
+        <li>Rul ned og tryk 10 gange på <b>Version</b>, og godkend udviklertilstand.</li>
+        <li>Tryk ⋮ øverst → <b>Udviklerindstillinger</b> → slå <b>Ukendte kilder</b> til.</li>
+        <li>Under <b>Tilpas startprogram</b> kan du sætte Køretøjslog på listen.</li>
+        <li>Forbind til skærmen, og vælg Køretøjslog i app-oversigten.</li></ol></details></div>` : ''}
     <div class="card" style="margin-top:14px"><h3>🎨 Tema</h3>
       <div class="chips" style="margin-top:8px">${[['auto', '⚙️ Følg enheden'], ['light', '☀️ Lyst'], ['dark', '🌙 Mørkt']].map(([k, l]) =>
         `<button class="chip ${(localStorage.getItem('theme') || 'auto') === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div>
@@ -1223,6 +1254,8 @@ function renderSettings() {
         : `<p class="muted small">Åbn appens adresse i Chrome, tryk på ⋮-menuen og vælg <b>Installér app</b> / <b>Føj til startskærm</b>. Gør det samme på telefonen, og forbind til samme Google-konto.</p>`}
       <p class="muted small">Version ${APP_VERSION}${IS_NATIVE ? ' · Android-app' : ''}</p>
     </div>`;
+  for (const k of ['aaWarnKm', 'aaWarnDays']) if ($('#' + k)) $('#' + k).onchange = e => { localStorage.setItem(k, String(Math.max(0, num(e.target.value) || 0))); pushCarData(); toast('Gemt'); };
+  if ($('#aaSpeedLimit')) $('#aaSpeedLimit').onchange = e => { localStorage.setItem('aaSpeedLimit', e.target.checked ? '1' : '0'); pushCarData(); };
   if ($('#cid')) $('#cid').onchange = e => { localStorage.setItem('clientId', e.target.value.trim()); toast('Client ID gemt'); };
   $('#imp').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -1769,7 +1802,7 @@ async function start() {
   applyTheme();
   try { const d = await DB.get('kv', 'data'); if (d) data = merge(emptyData(), d); } catch (e) { console.error(e); toast('Kunne ikke læse lokale data'); }
   if (generateRecurring()) persist();
-  if (IS_NATIVE) { setTimeout(importTrips, 1500); setInterval(pollTrip, 15000); }
+  if (IS_NATIVE) { setTimeout(importTrips, 1500); setInterval(pollTrip, 15000); setTimeout(pushCarData, 2000); }
   window.addEventListener('hashchange', render);
   matchMedia('(min-width: 840px)').addEventListener('change', render);
   render();
