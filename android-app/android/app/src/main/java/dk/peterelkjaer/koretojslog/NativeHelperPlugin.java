@@ -359,4 +359,11 @@ public class NativeHelperPlugin extends Plugin {
         TripStore.ack(getContext(), ids);
         call.resolve();
     }
+
+    /** Øjebliksbillede af tallene til Android Auto-skærmen (sendes fra web-delen). */
+    @PluginMethod
+    public void setCarData(PluginCall call) {
+        CarData.save(getContext(), call.getString("json", "{}"));
+        call.resolve();
+    }
 }

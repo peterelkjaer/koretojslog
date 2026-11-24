@@ -85,6 +85,7 @@ public class TripService extends Service {
                 String address = intent.getStringExtra(EXTRA_ADDRESS);
                 String name = intent.getStringExtra(EXTRA_NAME);
                 if (name == null) name = TripStore.watchedName(this, address);
+                TripStore.prefs(this).edit().putString("lastAddress", TripStore.norm(address)).apply();
                 handler.removeCallbacks(finalizer);
                 stopping = false;
                 if (trip != null && !TripStore.norm(address).equals(trip.address)) { finishTripKeepService(); }
