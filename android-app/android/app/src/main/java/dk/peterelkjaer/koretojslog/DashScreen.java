@@ -48,11 +48,12 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
     private LocationCallback callback;
     private float speedKmh = -1;
     private long lastFix = 0;
-    private final SpeedLimitFetcher limits = new SpeedLimitFetcher();
+    private final SpeedLimitFetcher limits;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     public DashScreen(@NonNull CarContext carContext) {
         super(carContext);
+        limits = new SpeedLimitFetcher(carContext);
         getLifecycle().addObserver(this);
         carContext.getCarService(AppManager.class).setSurfaceCallback(this);
     }
