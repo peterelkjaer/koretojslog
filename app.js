@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -180,10 +180,11 @@ const sig = d => JSON.stringify(COLLS.map(c => [...(d[c] || [])].sort((x, y) => 
 function kmPoints(vid) {
   const pts = [], auto = [];
   for (const r of live('readings')) if (r.vehicleId === vid && r.km != null)
-    (r.auto ? auto : pts).push({ date: r.date, km: r.km, t: r.createdAt || r.updatedAt || '' });
+    (r.auto ? auto : pts).push({ date: r.date, km: r.km, t: r.createdAt || r.updatedAt || '', end: (() => { const te = r.tripEnd || (r.tripId && data.trips.find(x => x.id === r.tripId)?.endTs); return te ? new Date(te).toISOString() : (r.createdAt || r.updatedAt || ''); })() });
   for (const e of live('entries')) if (e.vehicleId === vid && e.km != null) pts.push({ date: e.date, km: e.km, t: e.createdAt || e.updatedAt || '' });
-  // Automatiske (GPS-)aflæsninger erstattes af en manuel aflæsning, der er indtastet senere og dateret samme dag eller senere
-  for (const a of auto) if (!pts.some(m => m.t > a.t && m.date >= a.date)) pts.push(a);
+  // En automatisk (GPS-)aflæsning tæller ikke, hvis en manuel kilometerstand er indtastet efter, at turen sluttede
+  // (så er turens kilometer allerede med i det indtastede tal) – også selvom turen først blev hentet senere.
+  for (const a of auto) if (!pts.some(m => m.t > a.end && m.date >= a.date)) pts.push(a);
   return pts.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km);
 }
 function currentKm(vid) { let m = null; for (const p of kmPoints(vid)) if (m == null || p.km > m) m = p.km; return m; }
@@ -322,7 +323,7 @@ const Drive = {
         return;
       } catch (e) {
         if (!interactive) throw new NeedAuth();
-        throw new Error(e.code === 'CANCELLED' ? 'Login blev afbrudt' : (e.message || 'Login fejlede'));
+        throw new Error(e.message || 'Login fejlede');
       }
     }
     if (!this.clientId()) throw new Error('Indsæt først dit Google Client ID under Indstillinger.');
@@ -1547,7 +1548,8 @@ async function importTrips() {
       const base = currentKm(v.id);
       upsert('trips', { id: t.id, vehicleId: v.id, date: localDate(new Date(t.start)), startTs: t.start, endTs: t.end, gpsKm: Math.round(gps * 100) / 100,
         km, maxKmh: Math.round((t.maxSpeed || 0) * 3.6), poly: t.poly || '', title: '', notes: '' });
-      if (base != null) upsert('readings', { id: 'trip_' + t.id, vehicleId: v.id, date: localDate(new Date(t.end || t.start)), km: Math.round(base + km), auto: true, tripId: t.id, createdAt: nowIso() });
+      if (base != null) upsert('readings', { id: 'trip_' + t.id, vehicleId: v.id, date: localDate(new Date(t.end || t.start)), km: Math.round(base + km), auto: true, tripId: t.id, tripEnd: t.end || t.start, createdAt: nowIso() });
+      localStorage.setItem('lastVehicle', v.id);
       ack.push(t.id); added++; addedKm += km;
     }
     if (added) { await persist(); render(); toast(`${added} tur${added > 1 ? 'e' : ''} hentet · ${fmtDec(addedKm)} km`); }

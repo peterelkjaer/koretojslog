@@ -119,19 +119,27 @@ public class NativeHelperPlugin extends Plugin {
                     resolveToken(call, result);
                 }
             })
-            .addOnFailureListener(e -> call.reject("Google-login fejlede: " + e.getMessage()));
+            .addOnFailureListener(e -> { TripStore.logEvent(getContext(), "Google-login fejlede: " + e.getMessage()); call.reject("Google-login fejlede: " + e.getMessage()); });
     }
 
     private void authResult(ActivityResult activityResult) {
         PluginCall call = pendingAuthCall;
         pendingAuthCall = null;
         if (call == null) return;
+        TripStore.logEvent(getContext(), "Google-login svar: resultCode=" + activityResult.getResultCode() + (activityResult.getData() == null ? ", ingen data" : ""));
         try {
             AuthorizationResult result = Identity.getAuthorizationClient(getActivity())
                 .getAuthorizationResultFromIntent(activityResult.getData());
             resolveToken(call, result);
         } catch (ApiException e) {
-            call.reject("Login blev afbrudt (" + e.getStatusCode() + ")", "CANCELLED");
+            String msg = "Login blev afbrudt (kode " + e.getStatusCode() + ", svar " + activityResult.getResultCode() + ")"
+                + (e.getMessage() != null ? ": " + e.getMessage() : "");
+            TripStore.logEvent(getContext(), msg);
+            call.reject(msg, "CANCELLED");
+        } catch (Exception e) {
+            String msg = "Login fejlede: " + e.getClass().getSimpleName() + " " + e.getMessage();
+            TripStore.logEvent(getContext(), msg);
+            call.reject(msg);
         }
     }
 
