@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -184,10 +184,12 @@ function kmPoints(vid) {
   for (const e of live('entries')) if (e.vehicleId === vid && e.km != null) pts.push({ date: e.date, km: e.km, t: e.createdAt || e.updatedAt || '' });
   // En automatisk (GPS-)aflæsning tæller ikke, hvis en manuel kilometerstand er indtastet efter, at turen sluttede
   // (så er turens kilometer allerede med i det indtastede tal) – også selvom turen først blev hentet senere.
-  for (const a of auto) if (!pts.some(m => m.t > a.end && m.date >= a.date)) pts.push(a);
-  return pts.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km);
+  for (const a of auto) if (!pts.some(m => m.t > a.end && m.date >= a.date)) pts.push({ ...a, t: a.end });
+  // Rækkefølge: dato, derefter tidspunktet for registreringen (seneste sidst)
+  return pts.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.t || '') < (b.t || '') ? -1 : (a.t || '') > (b.t || '') ? 1 : a.km - b.km);
 }
-function currentKm(vid) { let m = null; for (const p of kmPoints(vid)) if (m == null || p.km > m) m = p.km; return m; }
+// Den aktuelle kilometerstand er den senest registrerede – så en rettelse nedad også slår igennem
+function currentKm(vid) { const p = kmPoints(vid); return p.length ? p[p.length - 1].km : null; }
 function lastKmDate(vid) { const p = kmPoints(vid); return p.length ? p[p.length - 1].date : null; }
 function kmPerDay(vid) {
   const pts = kmPoints(vid); if (pts.length < 2) return null;
