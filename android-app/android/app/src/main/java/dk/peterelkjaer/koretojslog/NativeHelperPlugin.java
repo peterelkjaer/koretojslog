@@ -374,4 +374,14 @@ public class NativeHelperPlugin extends Plugin {
         CarData.save(getContext(), call.getString("json", "{}"));
         call.resolve();
     }
+
+    /** Gemte fartgrænse-felter: antal og størrelse, eller ryd dem (clear: true). */
+    @PluginMethod
+    public void speedCache(PluginCall call) {
+        SpeedLimits sl = SpeedLimits.get(getContext());
+        if (Boolean.TRUE.equals(call.getBoolean("clear", false))) sl.clearDisk();
+        long[] info = sl.diskInfo();
+        JSObject r = new JSObject(); r.put("tiles", info[0]); r.put("bytes", info[1]);
+        call.resolve(r);
+    }
 }

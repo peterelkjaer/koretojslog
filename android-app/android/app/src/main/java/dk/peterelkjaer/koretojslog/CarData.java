@@ -19,6 +19,7 @@ public class CarData {
         double tripKm = -1, odo = -1, range = -1;
         int service = 0;            // 0 = ok, 1 = snart (gul), 2 = overskredet (rød)
         boolean speedLimitOn = true;
+        boolean sndOver = true, sndAhead = true, sndService = true;
     }
 
     static void save(Context c, String json) { TripStore.prefs(c).edit().putString("carData", json).apply(); }
@@ -28,6 +29,8 @@ public class CarData {
         try {
             JSONObject root = new JSONObject(TripStore.prefs(c).getString("carData", "{}"));
             d.speedLimitOn = root.optBoolean("speedLimit", true);
+            JSONObject snd = root.optJSONObject("sounds");
+            if (snd != null) { d.sndOver = snd.optBoolean("over", true); d.sndAhead = snd.optBoolean("ahead", true); d.sndService = snd.optBoolean("service", true); }
             int warnKm = root.optInt("warnKm", 1000), warnDays = root.optInt("warnDays", 30);
             long updated = root.optLong("updated", 0);
             JSONArray vs = root.optJSONArray("vehicles");

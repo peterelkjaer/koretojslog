@@ -1,7 +1,7 @@
 /* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.8.4';
+const APP_VERSION = '1.9.0';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -51,7 +51,7 @@ const REM_TEMPLATES = [
   { name: 'Tændrør', intervalKm: 60000, intervalMonths: 48 },
   { name: 'Dækskifte (sommer/vinter)', intervalKm: null, intervalMonths: 6 },
 ];
-const COLLS = ['vehicles', 'entries', 'readings', 'reminders', 'files', 'recurring', 'tires', 'parts', 'trips'];
+const COLLS = ['vehicles', 'entries', 'readings', 'reminders', 'files', 'recurring', 'tires', 'parts', 'trips', 'places'];
 
 /* ---------- Hjælpere ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -127,7 +127,7 @@ const DB = (() => {
 })();
 
 /* ---------- Data ---------- */
-const emptyData = () => ({ schema: 1, vehicles: [], entries: [], readings: [], reminders: [], files: [], recurring: [], tires: [], parts: [], trips: [] });
+const emptyData = () => ({ schema: 1, vehicles: [], entries: [], readings: [], reminders: [], files: [], recurring: [], tires: [], parts: [], trips: [], places: [] });
 let data = emptyData();
 const live = c => data[c].filter(x => !x.deleted);
 const byId = (c, id) => data[c].find(x => x.id === id && !x.deleted);
@@ -159,7 +159,8 @@ function pushCarData() {
         reminders: sortedReminders(v.id).filter(x => x.s.level !== 'unknown').map(x => ({ nextKm: x.s.nextKm, nextDate: x.s.nextDate })) };
     });
     const json = JSON.stringify({ updated: Date.now(), warnKm: +(localStorage.getItem('aaWarnKm') || 1000), warnDays: +(localStorage.getItem('aaWarnDays') || 30),
-      speedLimit: localStorage.getItem('aaSpeedLimit') !== '0', vehicles });
+      speedLimit: localStorage.getItem('aaSpeedLimit') !== '0',
+      sounds: { over: localStorage.getItem('aaSndOver') !== '0', ahead: localStorage.getItem('aaSndAhead') !== '0', service: localStorage.getItem('aaSndService') !== '0' }, vehicles });
     Promise.resolve(NH.setCarData({ json })).catch(() => {});
   } catch (e) { console.warn('pushCarData', e); }
 }
@@ -932,7 +933,6 @@ function renderHome() {
   const tireWarn = vs.flatMap(v => currentTires(v.id).map(t => ({ t, a: tireAge(t) }))).filter(x => x.a && x.a.level !== 'ok');
   view().innerHTML = storageBanner() + `
     ${IS_NATIVE ? '<div id="liveTrip"></div>' : ''}
-    <div class="row no-print" style="margin-bottom:14px"><button class="btn primary" data-act="addEntry">🧾 Udgift / service</button><button class="btn" data-act="addReading">🔢 Kilometerstand</button></div>
     <div class="two-col"><div>
       <h2 style="margin-top:0">Dine køretøjer</h2>
       <div class="grid">${vs.map(v => vehicleCard(v, y)).join('')}</div>
@@ -1165,7 +1165,8 @@ function renderReports() {
         <td class="nowrap">${TYPES[e.type]?.icon || ''} ${TYPES[e.type]?.label || ''}</td><td>${esc(entryTitle(e))}${filesOf('entry', e.id).length ? ' 📎' : ''}</td>
         <td class="n">${e.km != null ? fmtNum(e.km) : ''}</td><td class="n">${e.cost != null ? fmtKr2(e.cost) : ''}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">Ingen registreringer i perioden.</td></tr>`}
       ${es.length ? `<tr><td colspan="${rf.vehicle ? 4 : 5}"><b>I alt</b></td><td class="n"><b>${fmtKr2(total)}</b></td></tr>` : ''}</table></div>
-    ${rf.vehicle ? seasonTable(rf.vehicle) + fuelTable(rf.vehicle, from, to) + serviceSummary(rf.vehicle) : ''}`;
+    ${rf.vehicle ? seasonTable(rf.vehicle) + fuelTable(rf.vehicle, from, to) + serviceSummary(rf.vehicle) : ''}
+    ${workReport()}`;
   $('#rVeh').onchange = e => { rf.vehicle = e.target.value; render(); };
   $('#rPer').onchange = e => { rf.period = e.target.value; render(); };
   $('#rFrom') && ($('#rFrom').onchange = e => { rf.from = e.target.value; render(); });
@@ -1238,12 +1239,18 @@ function renderSettings() {
         <div class="f"><label class="lbl">Servicelampe: dage før</label><input id="aaWarnDays" type="number" inputmode="numeric" value="${esc(localStorage.getItem('aaWarnDays') || 30)}"></div>
       </div>
       <label class="check"><input type="checkbox" id="aaSpeedLimit" ${localStorage.getItem('aaSpeedLimit') !== '0' ? 'checked' : ''}> Vis hastighedsgrænse (OpenStreetMap)</label>
+      <div class="lbl" style="margin:10px 0 4px">Lyde</div>
+      ${[['aaSndOver', '🔔 “Ding”, når fartgrænsen overskrides'], ['aaSndAhead', '🔈 “Bip”, når en ny fartgrænse kommer om 300 m'], ['aaSndService', '🔧 Servicelampe: “ding” ved gul, “biiip” ved rød (gentages hver 20. km)']].map(([k, l]) =>
+        `<label class="check"><input type="checkbox" id="${k}" ${localStorage.getItem(k) !== '0' ? 'checked' : ''}> ${l}</label>`).join('')}
+      <p class="muted small" style="margin:8px 0 0">Gråt skilt = vejen har ingen registreret grænse, så den generelle grænse er anslået ud fra vejtypen. Fartgrænserne gemmes på telefonen, så kendte strækninger vises med det samme.
+        <span id="speedCache"></span></p>
       <details style="margin-top:6px"><summary class="small">Sådan får du appen frem i Android Auto</summary><ol class="small" style="margin:6px 0 0;padding-left:20px">
         <li>Åbn Android Auto-indstillingerne på telefonen (Indstillinger → søg “Android Auto”).</li>
         <li>Rul ned og tryk 10 gange på <b>Version</b>, og godkend udviklertilstand.</li>
         <li>Tryk ⋮ øverst → <b>Udviklerindstillinger</b> → slå <b>Ukendte kilder</b> til.</li>
         <li>Under <b>Tilpas startprogram</b> kan du sætte Køretøjslog på listen.</li>
         <li>Forbind til skærmen, og vælg Køretøjslog i app-oversigten.</li></ol></details></div>` : ''}
+    ${workCard()}
     <div class="card" style="margin-top:14px"><h3>🎨 Tema</h3>
       <div class="chips" style="margin-top:8px">${[['auto', '⚙️ Følg enheden'], ['light', '☀️ Lyst'], ['dark', '🌙 Mørkt']].map(([k, l]) =>
         `<button class="chip ${(localStorage.getItem('theme') || 'auto') === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div>
@@ -1258,7 +1265,8 @@ function renderSettings() {
       <p class="muted small">Version ${APP_VERSION}${IS_NATIVE ? ' · Android-app' : ''}</p>
     </div>`;
   for (const k of ['aaWarnKm', 'aaWarnDays']) if ($('#' + k)) $('#' + k).onchange = e => { localStorage.setItem(k, String(Math.max(0, num(e.target.value) || 0))); pushCarData(); toast('Gemt'); };
-  if ($('#aaSpeedLimit')) $('#aaSpeedLimit').onchange = e => { localStorage.setItem('aaSpeedLimit', e.target.checked ? '1' : '0'); pushCarData(); };
+  for (const k of ['aaSpeedLimit', 'aaSndOver', 'aaSndAhead', 'aaSndService']) if ($('#' + k)) $('#' + k).onchange = e => { localStorage.setItem(k, e.target.checked ? '1' : '0'); pushCarData(); };
+  if (IS_NATIVE && NH && NH.speedCache) Promise.resolve(NH.speedCache({})).then(r => { const el = $('#speedCache'); if (el && r && r.tiles) el.innerHTML = ` Gemt: ${r.tiles} område${r.tiles > 1 ? 'r' : ''} (${fmtDec(r.bytes / 1048576, 1)} MB). <a href="#" data-act="clearSpeedCache">Ryd</a>`; }).catch(() => {});
   if ($('#cid')) $('#cid').onchange = e => { localStorage.setItem('clientId', e.target.value.trim()); toast('Client ID gemt'); };
   $('#imp').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -1549,7 +1557,7 @@ async function importTrips() {
       const gps = (t.meters || 0) / 1000; const km = Math.round(gps * (v.kmFactor || 1) * 10) / 10;
       const base = currentKm(v.id);
       upsert('trips', { id: t.id, vehicleId: v.id, date: localDate(new Date(t.start)), startTs: t.start, endTs: t.end, gpsKm: Math.round(gps * 100) / 100,
-        km, maxKmh: Math.round((t.maxSpeed || 0) * 3.6), poly: t.poly || '', title: '', notes: '' });
+        km, maxKmh: Math.round((t.maxSpeed || 0) * 3.6), poly: t.poly || '', title: '', notes: '', work: !!workPlaceOf(t.poly), workAuto: true });
       if (base != null) upsert('readings', { id: 'trip_' + t.id, vehicleId: v.id, date: localDate(new Date(t.end || t.start)), km: Math.round(base + km), auto: true, tripId: t.id, tripEnd: t.end || t.start, createdAt: nowIso() });
       localStorage.setItem('lastVehicle', v.id);
       ack.push(t.id); added++; addedKm += km;
@@ -1588,7 +1596,7 @@ function tripsPanel(v) {
     if (m !== month) { month = m; out += `<div class="year-h"><span>${fmtMonth(t.date)}</span><span>${fmtKm(Math.round(ts.filter(x => x.date.startsWith(m)).reduce((a, x) => a + x.km, 0)))}</span></div>`; }
     const avg = tripAvg(t);
     out += `<div class="item" data-act="viewTrip" data-id="${t.id}"><div class="ic">🛣️</div><div class="body">
-      <div class="t">${esc(t.title || fmtDate(t.date))}</div>
+      <div class="t">${esc(t.title || fmtDate(t.date))}${t.work ? ' <span class="badge b-work">Arbejde</span>' : ''}</div>
       <div class="s">${t.title ? fmtDate(t.date) + ' · ' : ''}${fmtTime(t.startTs)}–${fmtTime(t.endTs)} · ${fmtDur(t.endTs - t.startTs)}${avg ? ` · gns. ${Math.round(avg)} km/t` : ''}</div></div>
       <div class="amt">${fmtDec(t.km)} km</div></div>`;
   }
@@ -1715,6 +1723,7 @@ function tripView(id) {
       ${t.maxKmh ? `<div class="kpi"><div class="l">Topfart (GPS)</div><div class="v">${t.maxKmh} km/t</div></div>` : ''}
     </div>
     <form><div class="fgrid">
+      <div class="f full"><label class="check" style="margin:0"><input type="checkbox" name="work" ${t.work ? 'checked' : ''}> 🏢 Arbejde (tæller med i kørselsfradrag)</label></div>
       <div class="f full"><label>Titel</label><input name="title" value="${esc(t.title)}" placeholder="F.eks. Tur til Skagen"></div>
       <div class="f full"><label>Noter</label><textarea name="notes">${esc(t.notes)}</textarea></div>
       <div class="f"><label>Distance (km)</label><input name="km" type="number" step="0.1" inputmode="decimal" value="${t.km}"></div>
@@ -1726,7 +1735,8 @@ function tripView(id) {
   drawMap($('#tripMap', m), [decodePoly(t.poly)]).then(map => { m.closest('.modal-bg')._cleanup = () => map.remove(); }).catch(e => { $('#tripMap', m).innerHTML = `<p class="muted small" style="padding:20px">Kortet kunne ikke indlæses (${esc(e.message)}).</p>`; });
   $('form', m).onsubmit = async ev => {
     ev.preventDefault(); const fd = new FormData(ev.target);
-    const nt = { ...t, title: fd.get('title').trim(), notes: fd.get('notes').trim(), km: num(fd.get('km')) ?? t.km, vehicleId: fd.get('vehicleId') };
+    const work = fd.get('work') === 'on';
+    const nt = { ...t, title: fd.get('title').trim(), notes: fd.get('notes').trim(), km: num(fd.get('km')) ?? t.km, vehicleId: fd.get('vehicleId'), work, workAuto: work === !!t.work ? t.workAuto : false };
     upsert('trips', nt);
     const r = data.readings.find(x => x.id === 'trip_' + t.id && !x.deleted);
     if (r && (nt.km !== t.km || nt.vehicleId !== t.vehicleId)) upsert('readings', { ...r, km: Math.round(r.km - t.km + nt.km), vehicleId: nt.vehicleId });
@@ -1736,6 +1746,133 @@ function tripView(id) {
     if (!confirm('Slet turen? Den automatiske kilometeraflæsning fra turen slettes også.')) return;
     softDelete('trips', id); softDelete('readings', 'trip_' + id); await persist(); await closeLayer(); render();
   };
+}
+
+/* ---------- Arbejdsture (kørselsfradrag) ---------- */
+function distM(aLat, aLon, bLat, bLon) {
+  const R = 6371000, r = Math.PI / 180, dLat = (bLat - aLat) * r, dLon = (bLon - aLon) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+// Arbejdsplads, som turen starter eller slutter ved (eller null)
+function workPlaceOf(poly) {
+  const places = live('places'); if (!places.length || !poly) return null;
+  let pts; try { pts = decodePoly(poly); } catch (e) { return null; }
+  if (!pts.length) return null;
+  const ends = [pts[0], pts[pts.length - 1]];
+  return places.find(p => ends.some(([la, lo]) => distM(la, lo, p.lat, p.lon) <= (p.radius || 400))) || null;
+}
+function retagWork(silent) {
+  let n = 0;
+  for (const t of live('trips')) {
+    if (t.workAuto === false) continue;      // rettet i hånden – røres ikke
+    const w = !!workPlaceOf(t.poly);
+    if (w !== !!t.work) { upsert('trips', { ...t, work: w, workAuto: true }); n++; }
+  }
+  return persist().then(() => { if (!silent) { render(); toast(n ? `${n} tur${n > 1 ? 'e' : ''} opdateret` : 'Ingen ændringer'); } return n; });
+}
+function workCard() {
+  const ps = live('places');
+  return `<div class="card" style="margin-top:14px"><h3>🏢 Arbejdsplads (kørselsfradrag)</h3>
+    <p class="muted small">Ture, der starter eller slutter ved en arbejdsplads, markeres automatisk som <b>Arbejde</b>. Du kan altid rette det på den enkelte tur. Opgørelsen pr. måned finder du under Rapporter.</p>
+    ${ps.map(p => `<div class="item" data-act="editPlace" data-id="${p.id}"><div class="ic">🏢</div><div class="body"><div class="t">${esc(p.name)}</div>
+      <div class="s">${esc(p.label || `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`)} · inden for ${p.radius || 400} m</div></div></div>`).join('')}
+    <div class="row" style="margin-top:8px"><button class="btn" data-act="addPlace">＋ Tilføj arbejdsplads</button>${ps.length ? '<button class="btn" data-act="retagWork">↻ Markér tidligere ture</button>' : ''}</div></div>`;
+}
+function placeForm(id) {
+  const p = id ? { ...byId('places', id) } : { id: uid(), name: 'Arbejde', kind: 'work', radius: 400, lat: null, lon: null, label: '' };
+  const m = modal(id ? 'Arbejdsplads' : 'Ny arbejdsplads', `<form>
+    <div class="fgrid">
+      <div class="f full"><label>Navn</label><input name="name" value="${esc(p.name)}"></div>
+      <div class="f full"><label>Find adresse</label><div class="row" style="flex-wrap:nowrap"><input id="plQ" type="search" placeholder="Vej, nr., by" style="flex:1" value="${esc(p.label)}"><button type="button" class="btn" id="plSearch">Søg</button></div>
+        <div id="plRes"></div></div>
+      <div class="f full"><button type="button" class="btn" id="plHere">📍 Brug min nuværende position</button></div>
+      <div class="f full"><div id="plMap" style="height:260px;border-radius:12px;overflow:hidden;background:var(--bg)"></div>
+        <p class="muted small" style="margin:4px 0 0">Tryk på kortet for at flytte punktet.</p></div>
+      <div class="f"><label>Afstand (meter)</label><input name="radius" type="number" inputmode="numeric" value="${p.radius || 400}"></div>
+    </div>
+    <div class="modal-actions">${id ? '<button type="button" class="btn danger" data-del>Slet</button>' : ''}<span class="spacer"></span>
+      <button type="button" class="btn" data-close>Annullér</button><button class="btn primary">Gem</button></div></form>`);
+  let map = null, mk = null, circ = null;
+  const setPt = (lat, lon, label, zoom) => {
+    p.lat = lat; p.lon = lon; if (label != null) p.label = label;
+    if (!map) return;
+    const r = num($('[name=radius]', m).value) || 400;
+    if (mk) mk.setLatLng([lat, lon]); else mk = L.marker([lat, lon]).addTo(map);
+    if (circ) { circ.setLatLng([lat, lon]); circ.setRadius(r); } else circ = L.circle([lat, lon], { radius: r, color: '#1e5fae', weight: 1, fillOpacity: 0.12 }).addTo(map);
+    map.setView([lat, lon], zoom || Math.max(map.getZoom() || 15, 15));
+  };
+  loadLeaflet().then(() => {
+    map = L.map($('#plMap', m)); map.attributionControl.setPrefix(false);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+    if (p.lat != null) setPt(p.lat, p.lon, null, 15); else map.setView([56, 10.5], 6);
+    map.on('click', e => setPt(e.latlng.lat, e.latlng.lng, ''));
+    m.closest('.modal-bg')._cleanup = () => map.remove();
+    setTimeout(() => map.invalidateSize(), 250);
+  }).catch(e => { $('#plMap', m).innerHTML = `<p class="muted small" style="padding:20px">Kortet kunne ikke indlæses (${esc(e.message)}).</p>`; });
+  $('[name=radius]', m).onchange = () => { if (p.lat != null) setPt(p.lat, p.lon); };
+  const search = async () => {
+    const q = $('#plQ', m).value.trim(); if (!q) return;
+    const box = $('#plRes', m); box.innerHTML = '<p class="muted small">Søger …</p>';
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=dk&accept-language=da&q=' + encodeURIComponent(q));
+      const list = await r.json();
+      box.innerHTML = list.length ? list.map((x, i) => `<div class="item" data-i="${i}" style="cursor:pointer"><div class="body"><div class="s">${esc(x.display_name)}</div></div></div>`).join('') : '<p class="muted small">Ingen resultater.</p>';
+      box.querySelectorAll('[data-i]').forEach(el => el.onclick = () => { const x = list[+el.dataset.i]; setPt(+x.lat, +x.lon, x.display_name.split(',').slice(0, 2).join(','), 16); box.innerHTML = ''; });
+    } catch (e) { box.innerHTML = `<p class="muted small">Søgning fejlede (${esc(e.message)}).</p>`; }
+  };
+  $('#plSearch', m).onclick = search;
+  $('#plQ', m).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); search(); } };
+  $('#plHere', m).onclick = () => {
+    if (!navigator.geolocation) return toast('Position er ikke tilgængelig');
+    toast('Finder position …');
+    navigator.geolocation.getCurrentPosition(pos => setPt(pos.coords.latitude, pos.coords.longitude, 'Min position', 16),
+      err => toast('Position kunne ikke findes: ' + err.message), { enableHighAccuracy: true, timeout: 15000 });
+  };
+  $('form', m).onsubmit = async ev => {
+    ev.preventDefault();
+    if (p.lat == null) return toast('Vælg et punkt på kortet eller søg en adresse');
+    const fd = new FormData(ev.target);
+    upsert('places', { ...p, name: fd.get('name').trim() || 'Arbejde', radius: Math.max(50, num(fd.get('radius')) || 400) });
+    await closeLayer(); const n = await retagWork(true); render(); toast(n ? `Gemt · ${n} tur${n > 1 ? 'e' : ''} markeret` : 'Gemt');
+  };
+  const del = $('[data-del]', m);
+  if (del) del.onclick = async () => { if (!confirm('Slet arbejdspladsen? Ture, der er markeret automatisk, opdateres.')) return;
+    softDelete('places', p.id); await closeLayer(); await retagWork(true); render(); };
+}
+function workTrips(year) {
+  return live('trips').filter(t => t.work && t.date.startsWith(year) && (!rf.vehicle || t.vehicleId === rf.vehicle));
+}
+function workMonths(year) {
+  return MONTHS.map((mn, i) => {
+    const k = `${year}-${String(i + 1).padStart(2, '0')}`;
+    const ts = workTrips(year).filter(t => t.date.startsWith(k));
+    return { name: mn[0].toUpperCase() + mn.slice(1), trips: ts.length, days: new Set(ts.map(t => t.date)).size, km: ts.reduce((a, t) => a + (t.km || 0), 0) };
+  });
+}
+function workReport() {
+  const all = live('trips').filter(t => t.work);
+  if (!all.length && !live('places').length) return '';
+  const cy = today().slice(0, 4);
+  const years = [...new Set([cy, ...all.map(t => t.date.slice(0, 4))])].sort().reverse();
+  const y = rf.workYear && years.includes(rf.workYear) ? rf.workYear : cy;
+  const ms = workMonths(y); const tot = ms.reduce((a, m) => ({ trips: a.trips + m.trips, days: a.days + m.days, km: a.km + m.km }), { trips: 0, days: 0, km: 0 });
+  return `<h2>🏢 Arbejdsture ${y} <span class="muted small">(kørselsfradrag${rf.vehicle ? ' · ' + esc(vehicleName(rf.vehicle)) : ''})</span></h2>
+    <div class="row no-print" style="margin-bottom:8px"><div class="chips">${years.map(x => `<button class="chip ${x === y ? 'on' : ''}" data-act="workYear" data-id="${x}">${x}</button>`).join('')}</div>
+      <span class="spacer"></span><button class="btn" data-act="exportWorkCsv" data-id="${y}">⤓ CSV</button></div>
+    <div class="card scroll-x"><table class="t"><tr><th>Måned</th><th class="n">Ture</th><th class="n">Dage</th><th class="n">Km</th></tr>
+      ${ms.map(m => `<tr${m.trips ? '' : ' class="muted"'}><td>${m.name}</td><td class="n">${m.trips}</td><td class="n">${m.days}</td><td class="n">${m.trips ? fmtDec(m.km) : ''}</td></tr>`).join('')}
+      <tr><td><b>I alt</b></td><td class="n"><b>${tot.trips}</b></td><td class="n"><b>${tot.days}</b></td><td class="n"><b>${fmtDec(tot.km)}</b></td></tr></table>
+      <p class="muted small" style="margin:8px 0 0">Ture = antal ture markeret Arbejde. Dage = antal forskellige dage med mindst én arbejdstur. ${live('places').length ? '' : '<a href="#/settings">Tilføj din arbejdsplads</a> for automatisk markering.'}</p></div>`;
+}
+function exportWorkCsv(year) {
+  const ms = workMonths(year);
+  const dec = n => String(Math.round(n * 10) / 10).replace('.', ',');
+  const rows = [['Måned', 'Ture', 'Dage', 'Km'], ...ms.map(m => [m.name, m.trips, m.days, dec(m.km)]),
+    ['I alt', ms.reduce((a, m) => a + m.trips, 0), ms.reduce((a, m) => a + m.days, 0), dec(ms.reduce((a, m) => a + m.km, 0))], [], ['Dato', 'Start', 'Slut', 'Køretøj', 'Km', 'Titel']];
+  for (const t of workTrips(year).sort((a, b) => a.startTs - b.startTs)) rows.push([t.date, fmtTime(t.startTs), fmtTime(t.endTs), vehicleName(t.vehicleId), dec(t.km), t.title || '']);
+  const csv = '﻿' + rows.map(r => r.map(v => { const s = String(v ?? ''); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n');
+  download(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `arbejdsture-${year}.csv`);
 }
 
 function allTripsMap(vid) {
@@ -1776,6 +1913,9 @@ const ACT = {
   rCat: d => { rf.cats.has(d.id) ? rf.cats.delete(d.id) : rf.cats.add(d.id); render(); },
   rCatAll: () => { rf.cats = rf.cats.size === Object.keys(TYPES).length ? new Set() : new Set(Object.keys(TYPES)); render(); },
   exportCsv: () => exportCsv(),
+  addPlace: () => placeForm(), editPlace: d => placeForm(d.id), retagWork: () => retagWork(),
+  workYear: d => { rf.workYear = d.id; render(); }, exportWorkCsv: d => exportWorkCsv(d.id),
+  clearSpeedCache: async () => { if (!confirm('Slette de gemte fartgrænser? De hentes igen, næste gang du kører.')) return; await NH.speedCache({ clear: true }); render(); toast('Ryddet'); },
   addRecurring: d => recurringForm(d.id), editRecurring: d => recurringForm(null, d.id),
   addTire: d => tireForm(d.id), editTire: d => tireForm(null, d.id), changeTire: d => { const t = byId('tires', d.id); tireForm(t.vehicleId, null, t); },
   addPart: d => partForm(d.id), editPart: d => partForm(null, d.id),

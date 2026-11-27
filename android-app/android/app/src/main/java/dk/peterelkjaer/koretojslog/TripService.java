@@ -54,6 +54,7 @@ public class TripService extends Service {
     private Location last;
     private long lastSave = 0;
     private boolean stopping = false;
+    private boolean speedOn = true;
 
     /** Starter eller stopper tjenesten sikkert (fejl logges i stedet for at crashe). */
     static void send(Context c, String action, String address, String name) {
@@ -166,6 +167,7 @@ public class TripService extends Service {
 
     private void beginUpdates() {
         running = true;
+        try { speedOn = new org.json.JSONObject(TripStore.prefs(this).getString("carData", "{}")).optBoolean("speedLimit", true); } catch (Exception ignored) { }
         if (callback != null) return;
         fused = LocationServices.getFusedLocationProviderClient(this);
         LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000)
@@ -205,6 +207,7 @@ public class TripService extends Service {
             if (l.hasSpeed()) trip.maxSpeed = Math.max(trip.maxSpeed, l.getSpeed());
         }
         trip.points.add(new double[]{l.getLatitude(), l.getLongitude()});
+        if (speedOn) SpeedLimits.get(this).onTripLocation(l);      // hent fartgrænser i forvejen
         trip.lastUpdate = System.currentTimeMillis();
         last = l;
         long now = System.currentTimeMillis();

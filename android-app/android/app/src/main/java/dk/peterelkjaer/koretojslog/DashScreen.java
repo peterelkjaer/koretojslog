@@ -48,12 +48,12 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
     private LocationCallback callback;
     private float speedKmh = -1;
     private long lastFix = 0;
-    private final SpeedLimitFetcher limits;
+    private final SpeedLimits limits;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     public DashScreen(@NonNull CarContext carContext) {
         super(carContext);
-        limits = new SpeedLimitFetcher(carContext);
+        limits = SpeedLimits.get(carContext);
         getLifecycle().addObserver(this);
         carContext.getCarService(AppManager.class).setSurfaceCallback(this);
     }
@@ -67,7 +67,7 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
     }
 
     @Override public void onCreate(@NonNull LifecycleOwner owner) { startLocation(); handler.post(ticker); }
-    @Override public void onDestroy(@NonNull LifecycleOwner owner) { handler.removeCallbacks(ticker); stopLocation(); limits.shutdown(); }
+    @Override public void onDestroy(@NonNull LifecycleOwner owner) { handler.removeCallbacks(ticker); stopLocation(); }
 
     private void startLocation() {
         fused = LocationServices.getFusedLocationProviderClient(getCarContext());
@@ -76,6 +76,8 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
             @Override public void onLocationResult(@NonNull LocationResult r) {
                 Location l = r.getLastLocation(); if (l == null) return;
                 speedKmh = l.hasSpeed() ? l.getSpeed() * 3.6f : -1; lastFix = System.currentTimeMillis();
+                if (lastLoc != null && (!l.hasAccuracy() || l.getAccuracy() < 30)) { float m = lastLoc.distanceTo(l); if (m < 200) sessionMeters += m; }
+                lastLoc = l;
                 limits.onLocation(l);
             }
         };
@@ -103,74 +105,137 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
         return f.replace(',', 'X').replace('.', ',').replace('X', '.');
     }
 
+    // ---- lyde ----
+    private Location lastLoc;
+    private double sessionMeters = 0, alarmAt = -1;
+    private int prevService = 0, overTicks = 0, overLimit = -1;
+    private boolean overFired = false;
+    private long lastAheadKey = 0;
+
+    private void evaluateSounds(CarData.Dash d, SpeedLimits.Result r) {
+        boolean fresh = System.currentTimeMillis() - lastFix < 5000 && speedKmh >= 0;
+        // Fartgrænse overskredet (kun registrerede grænser, ikke anslåede)
+        if (r.limit > 0 && !r.est && fresh && speedKmh > r.limit + 3) {
+            if (r.limit != overLimit) { overFired = false; overLimit = r.limit; }
+            if (++overTicks >= 2 && !overFired) { overFired = true; if (d.sndOver) Sounds.ding(getCarContext()); }
+        } else {
+            overTicks = 0;
+            if (r.limit <= 0 || !fresh || speedKmh <= r.limit) { overFired = false; overLimit = -1; }
+        }
+        // Ny grænse forude
+        if (r.ahead > 0 && r.aheadKey != lastAheadKey) { lastAheadKey = r.aheadKey; if (d.sndAhead && d.speedLimitOn) Sounds.bip(getCarContext()); }
+        if (r.ahead <= 0) lastAheadKey = 0;
+        // Service: gul = ding én gang, rød = biiip og igen for hver 20 km
+        if (d.service == 1 && prevService == 0 && d.sndService) Sounds.ding(getCarContext());
+        if (d.service == 2) {
+            if (prevService != 2 || (alarmAt >= 0 && sessionMeters - alarmAt >= 20_000)) {
+                alarmAt = sessionMeters; if (d.sndService) Sounds.alarm(getCarContext());
+            }
+        } else alarmAt = -1;
+        prevService = d.service;
+    }
+
     private void render(Canvas c) {
         c.drawColor(Color.rgb(18, 18, 18));
         Rect a = visible != null && !visible.isEmpty() ? visible : new Rect(0, 0, width, height);
         int aw = a.width(), ah = a.height();
         if (aw <= 0 || ah <= 0) return;
         CarData.Dash d = CarData.compute(getCarContext());
-        float unit = Math.min(ah, aw / 1.6f);
+        SpeedLimits.Result r = d.speedLimitOn ? limits.current() : new SpeedLimits.Result();
+        evaluateSounds(d, r);
+        float unit = Math.min(ah, aw / 1.6f), pad = unit * 0.04f;
 
-        // Servicelampe øverst til højre
-        if (d.service > 0) {
-            int col = d.service == 2 ? Color.rgb(226, 75, 74) : Color.rgb(239, 159, 39);
-            float isz = unit * 0.11f;
-            p.setColor(col); p.setTypeface(Typeface.DEFAULT_BOLD); p.setTextSize(unit * 0.07f); p.setTextAlign(Paint.Align.RIGHT);
-            float tx = a.right - unit * 0.04f, ty = a.top + unit * 0.04f + isz * 0.75f;
-            c.drawText("Service", tx, ty, p);
-            float textW = p.measureText("Service");
-            Drawable ic = ContextCompat.getDrawable(getCarContext(), R.drawable.ic_service);
-            if (ic != null) {
-                ic = ic.mutate(); ic.setTint(col);
-                int right = (int) (tx - textW - unit * 0.02f), top = (int) (a.top + unit * 0.04f);
-                ic.setBounds(right - (int) isz, top, right, top + (int) isz); ic.draw(c);
-            }
-        }
+        // ---- Lamperækken øverst til venstre (plads til flere lamper med tiden) ----
+        float lampH = unit * 0.15f, lx = a.left + pad;
+        if (d.service > 0) lx = drawLamp(c, lx, a.top + pad, unit, R.drawable.ic_service, "Service",
+            d.service == 2 ? Color.rgb(226, 75, 74) : Color.rgb(239, 159, 39));
 
-        // Stor hastighed
-        boolean fresh = System.currentTimeMillis() - lastFix < 5000 && speedKmh >= 0;
-        String sp = fresh ? String.valueOf(Math.round(speedKmh < 3 ? 0 : speedKmh)) : "–";
-        int limit = d.speedLimitOn ? limits.current() : -1;
-        float bottomH = unit * 0.24f;
-        float midY = a.top + (ah - bottomH) * 0.52f;
-        p.setTextAlign(Paint.Align.CENTER); p.setTypeface(Typeface.DEFAULT_BOLD);
-        p.setTextSize(unit * 0.42f);
-        float speedW = p.measureText(sp);
-        float signR = unit * 0.11f;
-        float groupW = speedW + (limit > 0 ? signR * 2 + unit * 0.08f : 0);
-        float sx = a.left + aw / 2f - groupW / 2f + speedW / 2f;
-        boolean over = limit > 0 && fresh && speedKmh > limit + 3;
-        p.setColor(over ? Color.rgb(240, 149, 149) : Color.WHITE);
-        c.drawText(sp, sx, midY + unit * 0.12f, p);
-        p.setColor(Color.rgb(170, 170, 170)); p.setTypeface(Typeface.DEFAULT); p.setTextSize(unit * 0.065f);
-        c.drawText("km/t", sx, midY + unit * 0.22f, p);
-
-        // Hastighedsgrænse som skilt
-        if (limit > 0) {
-            float cx = sx + speedW / 2f + unit * 0.08f + signR, cy = midY - unit * 0.02f;
-            p.setStyle(Paint.Style.FILL); p.setColor(Color.WHITE); c.drawCircle(cx, cy, signR, p);
-            p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(signR * 0.22f); p.setColor(Color.rgb(214, 44, 44));
-            c.drawCircle(cx, cy, signR - signR * 0.11f, p);
-            p.setStyle(Paint.Style.FILL); p.setColor(Color.rgb(17, 17, 17)); p.setTypeface(Typeface.DEFAULT_BOLD);
-            p.setTextSize(signR * (limit >= 100 ? 0.75f : 0.9f));
-            c.drawText(String.valueOf(limit), cx, cy + signR * 0.32f, p);
-        }
-
-        // Tre små tal i bunden
-        float lineY = a.bottom - bottomH;
-        p.setColor(Color.rgb(44, 44, 44)); p.setStrokeWidth(2); c.drawLine(a.left + unit * 0.04f, lineY, a.right - unit * 0.04f, lineY, p);
+        // ---- Bunden: tur, km-stand, rækkevidde ----
+        float bottomH = unit * 0.30f, lineY = a.bottom - bottomH;
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(Color.rgb(48, 48, 48)); p.setStrokeWidth(2); c.drawLine(a.left + pad, lineY, a.right - pad, lineY, p);
         String[] labels = {"Tur", "Km-stand", "Rækkevidde"};
         String[] vals = {
             d.tripKm >= 0 ? fmt(d.tripKm, 1) + " km" : "–",
             d.odo >= 0 ? fmt(Math.floor(d.odo), 0) : "–",
-            d.range >= 0 ? "ca. " + fmt(Math.round(d.range / 5.0) * 5, 0) + " km" : "–"
+            d.range >= 0 ? fmt(Math.round(d.range / 5.0) * 5, 0) + " km" : "–"
         };
+        p.setTextAlign(Paint.Align.CENTER);
+        float colW = aw / 3f - pad;
         for (int i = 0; i < 3; i++) {
             float cx = a.left + aw * (i * 2 + 1) / 6f;
-            p.setTypeface(Typeface.DEFAULT); p.setTextSize(unit * 0.055f); p.setColor(Color.rgb(154, 154, 154));
-            c.drawText(labels[i], cx, lineY + bottomH * 0.38f, p);
-            p.setTypeface(Typeface.DEFAULT_BOLD); p.setTextSize(unit * 0.08f); p.setColor(Color.WHITE);
-            c.drawText(vals[i], cx, lineY + bottomH * 0.8f, p);
+            p.setTypeface(Typeface.DEFAULT); p.setTextSize(unit * 0.065f); p.setColor(Color.rgb(160, 160, 160));
+            c.drawText(labels[i], cx, lineY + bottomH * 0.33f, p);
+            p.setTypeface(Typeface.DEFAULT_BOLD); p.setColor(Color.WHITE);
+            fit(vals[i], unit * 0.12f, colW);
+            c.drawText(vals[i], cx, lineY + bottomH * 0.82f, p);
         }
+
+        // ---- Midten: stor hastighed og skilt i samme højde ----
+        float top = a.top + lampH + pad * 0.5f, midH = lineY - top;
+        boolean fresh = System.currentTimeMillis() - lastFix < 5000 && speedKmh >= 0;
+        String sp = fresh ? String.valueOf(Math.round(speedKmh < 3 ? 0 : speedKmh)) : "–";
+        float S = Math.min(unit * 0.60f, (midH - unit * 0.10f) / 0.74f);
+        boolean showSign = r.limit > 0;
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        for (int k = 0; k < 6; k++) {
+            p.setTextSize(S);
+            float w = Math.max(p.measureText(sp), p.measureText("188"));
+            float D = S * 0.72f * 1.2f;
+            float g = w + (showSign || r.ahead > 0 ? unit * 0.10f + D : 0) + (showSign && r.ahead > 0 ? D * 0.30f : 0);
+            if (g <= aw - 2 * pad) break;
+            S *= 0.92f;
+        }
+        p.setTextSize(S);
+        float speedW = Math.max(p.measureText(sp), p.measureText("188"));
+        float digitH = S * 0.72f, R2 = digitH * 1.2f / 2f;
+        boolean anySign = showSign || r.ahead > 0;
+        float groupW = speedW + (anySign ? unit * 0.10f + R2 * 2 : 0) + (showSign && r.ahead > 0 ? R2 * 0.6f : 0);
+        float sx = a.left + aw / 2f - groupW / 2f + speedW / 2f;
+        float baseY = top + (midH - unit * 0.10f) / 2f + digitH / 2f;
+        boolean over = r.limit > 0 && !r.est && fresh && speedKmh > r.limit + 3;
+        p.setTextAlign(Paint.Align.CENTER);
+        p.setColor(over ? Color.rgb(240, 120, 120) : Color.WHITE);
+        c.drawText(sp, sx, baseY, p);
+        p.setColor(Color.rgb(160, 160, 160)); p.setTypeface(Typeface.DEFAULT); p.setTextSize(unit * 0.07f);
+        c.drawText("km/t", sx, baseY + unit * 0.09f, p);
+
+        float cx = sx + speedW / 2f + unit * 0.10f + R2, cy = baseY - digitH / 2f;
+        if (showSign) {
+            if (r.est) sign(c, cx, cy, R2, r.limit, Color.rgb(58, 58, 58), Color.rgb(140, 140, 140), Color.rgb(205, 205, 205));
+            else sign(c, cx, cy, R2, r.limit, Color.WHITE, Color.rgb(214, 44, 44), Color.rgb(17, 17, 17));
+        }
+        if (r.ahead > 0) {
+            float rr = R2 * 0.55f;
+            float ax = showSign ? cx + R2 * 1.0f : cx, ay = showSign ? cy - R2 * 0.95f : cy;
+            p.setStyle(Paint.Style.FILL); p.setColor(Color.rgb(18, 18, 18)); c.drawCircle(ax, ay, rr * 1.12f, p);
+            sign(c, ax, ay, rr, r.ahead, Color.WHITE, Color.rgb(135, 135, 135), Color.rgb(17, 17, 17));
+        }
+    }
+
+    private void sign(Canvas c, float cx, float cy, float rad, int limit, int fill, int ring, int text) {
+        p.setStyle(Paint.Style.FILL); p.setColor(fill); c.drawCircle(cx, cy, rad, p);
+        p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(rad * 0.2f); p.setColor(ring);
+        c.drawCircle(cx, cy, rad - rad * 0.1f, p);
+        p.setStyle(Paint.Style.FILL); p.setColor(text); p.setTypeface(Typeface.DEFAULT_BOLD); p.setTextAlign(Paint.Align.CENTER);
+        p.setTextSize(rad * (limit >= 100 ? 0.72f : 0.95f));
+        c.drawText(String.valueOf(limit), cx, cy + p.getTextSize() * 0.36f, p);
+    }
+
+    /** Tegner en lampe (ikon + kort ord) og returnerer x til den næste. */
+    private float drawLamp(Canvas c, float x, float y, float unit, int icon, String word, int col) {
+        float isz = unit * 0.12f;
+        Drawable ic = ContextCompat.getDrawable(getCarContext(), icon);
+        if (ic != null) { ic = ic.mutate(); ic.setTint(col); ic.setBounds((int) x, (int) y, (int) (x + isz), (int) (y + isz)); ic.draw(c); }
+        p.setStyle(Paint.Style.FILL); p.setColor(col); p.setTypeface(Typeface.DEFAULT_BOLD); p.setTextSize(unit * 0.09f); p.setTextAlign(Paint.Align.LEFT);
+        float tx = x + isz + unit * 0.02f;
+        c.drawText(word, tx, y + isz * 0.5f + unit * 0.09f * 0.36f, p);
+        return tx + p.measureText(word) + unit * 0.06f;
+    }
+
+    private void fit(String s, float size, float maxW) {
+        p.setTextSize(size);
+        float w = p.measureText(s);
+        if (w > maxW) p.setTextSize(size * maxW / w);
     }
 }
