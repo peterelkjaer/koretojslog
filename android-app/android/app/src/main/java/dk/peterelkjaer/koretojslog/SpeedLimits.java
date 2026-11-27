@@ -270,7 +270,7 @@ public class SpeedLimits {
         HttpURLConnection con = (HttpURLConnection) new URL(server).openConnection();
         con.setConnectTimeout(10_000); con.setReadTimeout(35_000);
         con.setRequestMethod("POST"); con.setDoOutput(true);
-        con.setRequestProperty("User-Agent", "Koretojslog/1.9 (privat app; github.com/peterelkjaer/koretojslog)");
+        con.setRequestProperty("User-Agent", "Motorist/2.0 (privat app; github.com/peterelkjaer/koretojslog)");
         con.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
         con.setRequestProperty("Accept", "application/json");
         try (OutputStream out = con.getOutputStream()) { out.write(("data=" + URLEncoder.encode(q, "UTF-8")).getBytes(StandardCharsets.UTF_8)); }

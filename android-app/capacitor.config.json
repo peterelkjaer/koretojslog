@@ -1,6 +1,6 @@
 {
   "appId": "dk.peterelkjaer.koretojslog",
-  "appName": "Køretøjslog",
+  "appName": "Motorist",
   "webDir": "www",
   "android": {
     "allowMixedContent": false

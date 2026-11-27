@@ -156,7 +156,7 @@ public class NativeHelperPlugin extends Plugin {
 
     @PluginMethod
     public void print(PluginCall call) {
-        String name = call.getString("name", "Køretøjslog");
+        String name = call.getString("name", "Motorist");
         getActivity().runOnUiThread(() -> {
             try {
                 WebView webView = getBridge().getWebView();

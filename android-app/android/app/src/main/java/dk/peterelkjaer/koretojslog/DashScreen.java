@@ -61,7 +61,7 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
     @NonNull @Override
     public Template onGetTemplate() {
         ActionStrip strip = new ActionStrip.Builder()
-            .addAction(new Action.Builder().setTitle("Køretøjslog").setOnClickListener(this::draw).build())
+            .addAction(new Action.Builder().setTitle("Motorist").setOnClickListener(this::draw).build())
             .build();
         return new NavigationTemplate.Builder().setActionStrip(strip).build();
     }
@@ -136,7 +136,7 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
     }
 
     private void render(Canvas c) {
-        c.drawColor(Color.rgb(18, 18, 18));
+        drawBackground(c);
         Rect a = visible != null && !visible.isEmpty() ? visible : new Rect(0, 0, width, height);
         int aw = a.width(), ah = a.height();
         if (aw <= 0 || ah <= 0) return;
@@ -211,6 +211,39 @@ public class DashScreen extends Screen implements SurfaceCallback, DefaultLifecy
             p.setStyle(Paint.Style.FILL); p.setColor(Color.rgb(18, 18, 18)); c.drawCircle(ax, ay, rr * 1.12f, p);
             sign(c, ax, ay, rr, r.ahead, Color.WHITE, Color.rgb(135, 135, 135), Color.rgb(17, 17, 17));
         }
+    }
+
+    // ---- Baggrund "Dæmpede bølger" (forslag E) ----
+    private android.graphics.Bitmap bg;
+    private final Paint bgPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+
+    private void drawBackground(Canvas c) {
+        int w = c.getWidth(), h = c.getHeight();
+        if (bg == null || bg.getWidth() != Math.max(1, w / 4) || bg.getHeight() != Math.max(1, h / 4)) bg = waves(Math.max(1, w / 4), Math.max(1, h / 4));
+        c.drawBitmap(bg, null, new Rect(0, 0, w, h), bgPaint);
+    }
+
+    /** Bløde grå bølger (samme opskrift som designforslaget), beregnet i lav opløsning og skaleret blødt op. */
+    static android.graphics.Bitmap waves(int w, int h) {
+        double[][] bands = {{120, 80, 1700, 1.2, 110, 1.0}, {400, 70, 1700, 2.8, 100, 0.8}};
+        int[] px = new int[w * h];
+        for (int y = 0; y < h; y++) {
+            double Y = y * 430.0 / h;
+            for (int x = 0; x < w; x++) {
+                double X = x * 800.0 / w, v = 8;
+                for (double[] b : bands) {
+                    double cY = b[0] + b[1] * Math.sin(2 * Math.PI * X / b[2] + b[3]);
+                    double d = (Y - cY) / b[4];
+                    double rib = d < 0 ? Math.exp(-(d * 1.8) * (d * 1.8)) : Math.exp(-(d * 0.7) * (d * 0.7));
+                    double sn = Math.sin(2 * Math.PI * X / (b[2] * 1.3) + b[3] + 1);
+                    rib *= 0.55 + 0.45 * sn * sn;
+                    v = Math.max(v, 8 + b[5] * 59 * rib);
+                }
+                int g = (int) Math.round(v), bl = (int) Math.min(255, Math.round(v * 1.02));
+                px[y * w + x] = Color.rgb(g, g, bl);
+            }
+        }
+        return android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888);
     }
 
     private void sign(Canvas c, float cx, float cy, float rad, int limit, int fill, int ring, int text) {

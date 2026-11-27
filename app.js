@@ -1,7 +1,7 @@
-/* Køretøjslog – vedligeholdelse, udgifter og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
+/* Motorist (tidl. Køretøjslog) – vedligeholdelse, udgifter, ture og kilometer. Data gemmes lokalt og synkroniseres til Google Drive. */
 'use strict';
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '2.0.0';
 /* Kører vi som Android-app (APK)? Så bruges Androids eget Google-login, deling og udskrift. */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
 const NativePl = name => {
@@ -76,6 +76,18 @@ const fmtMonth = s => parseD(s).toLocaleDateString('da-DK', { month: 'long', yea
 const fmtDec = (n, d = 1) => n.toLocaleString('da-DK', { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmtSize = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' kB';
 const isWide = () => matchMedia('(min-width: 840px)').matches;
+/* Fold-ud-sektioner: appen husker, hvad der var åbent */
+const FOLDS = (() => { try { return JSON.parse(localStorage.getItem('folds') || '{}'); } catch (e) { return {}; } })();
+function fold(key, title, body, def = false, extra = '') {
+  const open = key in FOLDS ? FOLDS[key] : def;
+  return `<details class="fold" data-fold="${key}" ${open ? 'open' : ''}><summary><span class="fold-t">${title}</span>${extra ? `<span class="fold-x">${extra}</span>` : ''}</summary><div class="fold-b">${body}</div></details>`;
+}
+let printing = false;
+document.addEventListener('toggle', e => { const d = e.target; if (!printing && d.dataset && d.dataset.fold) { FOLDS[d.dataset.fold] = d.open; localStorage.setItem('folds', JSON.stringify(FOLDS)); } }, true);
+/* Funktioner, der kan slås fra */
+const FEATURES = [['tires', '🛞 Dæk'], ['parts', '🔩 Reservedele'], ['recurring', '📅 Faste udgifter'], ['work', '🏢 Arbejdsture'], ['seasons', '📆 Sæsonstatistik'], ['range', '⛽ Rækkevidde']];
+const featState = () => { try { return JSON.parse(localStorage.getItem('features') || '{}'); } catch (e) { return {}; } };
+const feat = k => featState()[k] !== false;
 function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
 const blobToBase64 = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
 async function download(blob, name) {
@@ -155,7 +167,7 @@ function pushCarData() {
     const vehicles = activeVehicles().map(v => {
       const r = fuelRange(v.id);
       return { id: v.id, name: v.name, address: (v.btAddress || '').toUpperCase(), manual: ('MANUAL-' + v.id).toUpperCase(),
-        km: currentKm(v.id), factor: v.kmFactor || 1, range: r ? r.range : null,
+        km: currentKm(v.id), factor: v.kmFactor || 1, range: r && feat('range') ? r.range : null,
         reminders: sortedReminders(v.id).filter(x => x.s.level !== 'unknown').map(x => ({ nextKm: x.s.nextKm, nextDate: x.s.nextDate })) };
     });
     const json = JSON.stringify({ updated: Date.now(), warnKm: +(localStorage.getItem('aaWarnKm') || 1000), warnDays: +(localStorage.getItem('aaWarnDays') || 30),
@@ -285,10 +297,10 @@ function fmtDuration(months) {
 }
 function economyCard(v) {
   const o = ownership(v);
-  if (!o) return `<div class="card" style="margin-top:14px"><div class="row between"><h3>💰 Økonomi</h3><button class="btn sm" data-act="editVehicle" data-id="${v.id}">Angiv købspris</button></div>
+  if (!o) return `<div class="card" style="margin-top:14px"><div class="row between"><h3>💰 Købs- og salgspris</h3><button class="btn sm" data-act="editVehicle" data-id="${v.id}">Angiv købspris</button></div>
     <p class="muted small" style="margin:6px 0 0">Indtast købspris og evt. salgspris eller anslået værdi, så kan du se, hvad køretøjet reelt har kostet dig.</p></div>`;
   const label = o.sold ? 'Samlet pris for ejerskabet' : (o.hasEnd ? 'Reel pris indtil nu' : 'Brugt indtil nu');
-  return `<div class="card" style="margin-top:14px"><div class="row between"><h3>💰 Økonomi</h3>${o.sold ? '<span class="badge b-unknown">Solgt</span>' : ''}</div>
+  return `<div class="card" style="margin-top:14px"><div class="row between"><h3>💰 Hvad har den kostet?</h3>${o.sold ? '<span class="badge b-unknown">Solgt</span>' : ''}</div>
     <table class="money" style="margin-top:6px">
       <tr><td>Købspris${v.buyDate ? ` <span class="muted small">(${fmtDate(v.buyDate)})</span>` : ''}</td><td class="n">${fmtKr2(v.buyPrice || 0)}</td></tr>
       <tr><td>+ Udgifter i alt</td><td class="n">${fmtKr2(o.expenses)}</td></tr>
@@ -301,7 +313,7 @@ function economyCard(v) {
       ${o.km ? `<div class="kpi"><div class="l">Kørt i ejertiden</div><div class="v" style="font-size:1.05rem">${fmtKm(o.km)}</div></div>
       <div class="kpi"><div class="l">Pr. km</div><div class="v">${fmtKr2(o.total / o.km)}</div></div>` : ''}
     </div>
-    ${!o.hasEnd ? '<p class="muted small" style="margin:10px 0 0">Tip: Angiv en anslået værdi i dag (Rediger ✏️), så tæller værditabet med i stedet for hele købsprisen.</p>' : ''}
+    ${!o.hasEnd ? '<p class="muted small" style="margin:10px 0 0">Tip: Angiv en anslået værdi i dag (✏️ Rediger), så tæller værditabet med i stedet for hele købsprisen.</p>' : ''}
     ${!v.buyDate ? '<p class="muted small" style="margin:6px 0 0">Angiv købsdato for at se pris pr. måned.</p>' : ''}</div>`;
 }
 const vehicleName = id => byId('vehicles', id)?.name || '(slettet)';
@@ -860,17 +872,22 @@ function docForm(vid) {
   };
 }
 
+// Køretøjet, telefonen sidst var forbundet til via Bluetooth (seneste automatiske tur)
+function lastBtVehicle() {
+  const t = live('trips').filter(x => isActiveId(x.vehicleId)).sort((a, b) => (b.endTs || 0) - (a.endTs || 0))[0];
+  return t ? t.vehicleId : null;
+}
 function quickAdd() {
-  const vid = currentRoute().vid;
+  if (needVehicle()) return;
+  const vid = currentRoute().vid || lastBtVehicle() || lastVehicle();
   const m = modal('Ny registrering', `<div class="quick">
-    <button data-q="fuel"><span>⛽</span><div><b>Optankning</b><div class="muted small">Kilometerstand, liter og beløb – giver km/l</div></div></button>
-    <button data-q="entry"><span>🧾</span><div><b>Udgift / service</b><div class="muted small">Værksted, reservedele, forsikring, brændstof …</div></div></button>
-    <button data-q="km"><span>🔢</span><div><b>Kilometerstand</b><div class="muted small">Hold styr på kørsel og kommende service</div></div></button>
-    <button data-q="vehicle"><span>🚗</span><div><b>Nyt køretøj</b><div class="muted small">Bil, motorcykel, trailer, traktor …</div></div></button>
-  </div>`);
+    <button data-q="fuel"><span>⛽</span><div><b>Optankning</b><div class="muted small">Km-stand, liter og beløb – giver km/l</div></div></button>
+    <button data-q="entry"><span>🧾</span><div><b>Udgift</b><div class="muted small">Service, reparation, forsikring, afgift …</div></div></button>
+    <button data-q="km"><span>🔢</span><div><b>Km-stand</b><div class="muted small">Ret eller registrér kilometerstanden</div></div></button>
+  </div>${activeVehicles().length > 1 ? `<p class="muted small" style="margin:10px 2px 0">Køretøj: <b>${esc(vehicleName(vid))}</b> (kan skiftes i formularen)</p>` : ''}`);
   $$('[data-q]', m).forEach(b => b.onclick = async () => {
     await closeLayer();
-    ({ fuel: () => entryForm(null, { vehicleId: vid, type: 'fuel' }), entry: () => entryForm(null, { vehicleId: vid }), km: () => readingForm(vid), vehicle: () => vehicleForm() })[b.dataset.q]();
+    ({ fuel: () => entryForm(null, { vehicleId: vid, type: 'fuel' }), entry: () => entryForm(null, { vehicleId: vid }), km: () => readingForm(vid) })[b.dataset.q]();
   });
 }
 
@@ -883,7 +900,7 @@ function currentRoute() {
 }
 const view = () => $('#view');
 function setTitle(t, nav) {
-  $('#pageTitle').textContent = t; document.title = t + ' · Køretøjslog';
+  $('#pageTitle').textContent = t; document.title = t + ' · Motorist';
   $$('[data-nav]').forEach(a => a.classList.toggle('active', a.dataset.nav === nav));
 }
 function render() {
@@ -913,48 +930,48 @@ function remItem(r, s, showVehicle) {
 }
 function yearCost(vid, year) { return live('entries').filter(e => (!vid || e.vehicleId === vid) && e.date.startsWith(year)).reduce((a, e) => a + (e.cost || 0), 0); }
 
+const LEVEL_RANK = { overdue: 3, soon: 2, ok: 1, unknown: 0 };
+// Samlet "trafiklys" for et køretøj: dårligste status blandt vedligehold (og dæk)
+function vehicleLight(vid) {
+  let worst = null;
+  for (const x of sortedReminders(vid)) if (!worst || LEVEL_RANK[x.s.level] > LEVEL_RANK[worst]) worst = x.s.level;
+  if (feat('tires')) for (const t of currentTires(vid)) { const a = tireAge(t); if (a && (!worst || LEVEL_RANK[a.level] > LEVEL_RANK[worst])) worst = a.level; }
+  return worst || 'none';
+}
+const LIGHT_TXT = { overdue: 'Skal ordnes nu', soon: 'Snart tid', ok: 'Alt i orden', unknown: 'Mangler oplysninger', none: 'Intet vedligehold oprettet' };
 function renderHome() {
   setTitle('Oversigt', 'home');
   const vs = activeVehicles();
   if (!vs.length) {
     view().innerHTML = storageBanner() + (live('vehicles').length ? `<div class="empty"><div class="e">🚗</div><h2>Ingen aktive køretøjer</h2>
       <p>Alle dine køretøjer er markeret som solgt. De ligger under <a href="#/vehicles">Køretøjer</a>.</p><button class="btn primary" data-act="addVehicle">＋ Tilføj køretøj</button></div>` : '') +
-      (live('vehicles').length ? '' : `<div class="empty"><div class="e">🚗</div><h2>Velkommen til Køretøjslog</h2>
+      (live('vehicles').length ? '' : `<div class="empty"><div class="e">🚗</div><h2>Velkommen til Motorist</h2>
       <p>Start med at oprette dit første køretøj.</p><button class="btn primary" data-act="addVehicle">＋ Tilføj køretøj</button>
       ${!Drive.enabled() ? '<p class="small" style="margin-top:20px">Har du allerede data på Google Drive fra en anden enhed? <a href="#/settings">Forbind Google Drive</a> først.</p>' : ''}</div>`);
     return;
   }
   const y = today().slice(0, 4);
-  const activeRems = sortedReminders().filter(x => isActiveId(x.r.vehicleId));
-  const rems = activeRems.filter(x => x.s.level !== 'ok').slice(0, 8);
-  const upcoming = rems.length ? rems : activeRems.slice(0, 3);
+  const rems = sortedReminders().filter(x => isActiveId(x.r.vehicleId) && (x.s.level === 'overdue' || x.s.level === 'soon'));
+  const tireWarn = feat('tires') ? vs.flatMap(v => currentTires(v.id).map(t => ({ t, a: tireAge(t) }))).filter(x => x.a && x.a.level !== 'ok') : [];
   const recent = live('entries').filter(e => isActiveId(e.vehicleId)).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
   const activeCost = yr => vs.reduce((a, v) => a + yearCost(v.id, yr), 0);
-  const tireWarn = vs.flatMap(v => currentTires(v.id).map(t => ({ t, a: tireAge(t) }))).filter(x => x.a && x.a.level !== 'ok');
+  const nAtt = rems.length + tireWarn.length;
   view().innerHTML = storageBanner() + `
     ${IS_NATIVE ? '<div id="liveTrip"></div>' : ''}
-    <div class="two-col"><div>
-      <h2 style="margin-top:0">Dine køretøjer</h2>
-      <div class="grid">${vs.map(v => vehicleCard(v, y)).join('')}</div>
-      <h2>${rems.length || tireWarn.length ? 'Kræver opmærksomhed' : 'Kommende vedligehold'}</h2>
-      <div class="list">${tireWarn.map(x => tireWarnItem(x)).join('')}${upcoming.length ? upcoming.map(x => remItem(x.r, x.s, vs.length > 1)).join('') : (tireWarn.length ? '' : '<p class="muted small">Ingen påmindelser oprettet. Åbn et køretøj og tilføj f.eks. olieskift.</p>')}</div>
-    </div><div>
-      <h2 style="margin-top:0">Seneste registreringer</h2>
-      <div class="list">${recent.length ? recent.map(e => entryItem(e, true)).join('') : '<p class="muted">Ingen endnu.</p>'}</div>
-      <h2>Udgifter ${y}</h2>
-      <div class="kpis"><div class="kpi"><div class="l">I alt</div><div class="v">${fmtKr(activeCost(y))}</div></div>
-      <div class="kpi"><div class="l">Sidste år</div><div class="v">${fmtKr(activeCost(String(y - 1)))}</div></div></div>
-    </div></div>`;
+    <div class="grid">${vs.map(v => vehicleCard(v, y)).join('')}</div>
+    ${nAtt ? fold('h-att', '⚠️ Kræver opmærksomhed', `<div class="list">${tireWarn.map(x => tireWarnItem(x)).join('')}${rems.map(x => remItem(x.r, x.s, vs.length > 1)).join('')}</div>`, true, String(nAtt)) : ''}
+    ${recent.length ? fold('h-recent', '🧾 Seneste udgifter', `<div class="list">${recent.map(e => entryItem(e, vs.length > 1)).join('')}</div>`, true) : ''}
+    ${activeCost(y) || activeCost(String(y - 1)) ? fold('h-cost', '💰 Udgifter', `<div class="kpis"><div class="kpi"><div class="l">I år (${y})</div><div class="v">${fmtKr(activeCost(y))}</div></div>
+      <div class="kpi"><div class="l">Sidste år</div><div class="v">${fmtKr(activeCost(String(y - 1)))}</div></div></div>`, true, fmtKr(activeCost(y))) : ''}`;
 }
 function vehicleCard(v, y) {
   const top = sortedReminders(v.id)[0]; const km = currentKm(v.id); const lk = lastKmDate(v.id);
-  return `<div class="card click" data-act="goVehicle" data-id="${v.id}">
-    <div class="row between"><h3>${vIcon(v)} ${esc(v.name)}</h3><span>${v.sellDate || v.sellPrice != null ? '<span class="badge b-soon">Solgt</span> ' : ''}${v.plate ? `<span class="badge b-unknown">${esc(v.plate)}</span>` : ''}</span></div>
-    <div class="muted small">${esc([v.make, v.model, v.year].filter(Boolean).join(' '))}</div>
-    <div class="row between" style="margin-top:8px"><span class="big-km">${fmtKm(km)}</span><span class="muted small">${lk ? 'pr. ' + fmtDate(lk) : ''}</span></div>
-    ${top ? `<div class="small" style="margin-top:6px"><span class="badge b-${top.s.level}">${esc(top.r.name)}</span> <span class="muted">${remText(top.s).split(' · ')[0] || ''}</span></div>` : ''}
-    ${rangeLine(v.id)}
-    <div class="muted small" style="margin-top:6px">Udgifter i år: <b>${fmtKr(yearCost(v.id, y))}</b></div></div>`;
+  const light = isSold(v) ? 'none' : vehicleLight(v.id);
+  return `<div class="card click vcard" data-act="goVehicle" data-id="${v.id}">
+    <div class="row between"><h3>${vIcon(v)} ${esc(v.name)}</h3>${isSold(v) ? '<span class="badge b-soon">Solgt</span>' : `<span class="tl tl-${light}" title="${LIGHT_TXT[light]}"></span>`}</div>
+    <div class="row between" style="margin-top:6px"><span class="big-km">${fmtKm(km)}</span><span class="muted small">${lk ? 'pr. ' + fmtDate(lk) : ''}</span></div>
+    <div class="small tl-txt tl-c-${light}" style="margin-top:6px"><b>${LIGHT_TXT[light]}</b>${top && light !== 'ok' ? ` · ${esc(top.r.name)} ${remText(top.s).split(' · ')[0] || ''}` : top ? ` · næste: ${esc(top.r.name)}` : ''}</div>
+    ${rangeLine(v.id)}</div>`;
 }
 function entryItem(e, showVehicle) {
   const t = TYPES[e.type] || TYPES.other; const nf = filesOf('entry', e.id).length;
@@ -977,67 +994,85 @@ function renderVehicles() {
         ${o ? `<div class="amt" title="Samlet pris for ejerskabet">${fmtKr(o.total)}</div>` : ''}</div>`; }).join('')}</div>` : ''}`;
 }
 
-const vTab = {}; const vSearch = {};
+const vTab = {}; const vSearch = {}; const vFilt = {};
+const VTABS = [['history', '📜 Historik'], ['maint', '🔧 Vedligehold'], ['econ', '💰 Økonomi'], ['docs', '📁 Dokumenter']];
+const OLD_TAB = { trips: 'history', km: 'history', reminders: 'maint', tires: 'maint', parts: 'maint', recurring: 'econ' };
 function renderVehicle(id) {
   const v = byId('vehicles', id);
   if (!v) { view().innerHTML = '<div class="empty">Køretøjet findes ikke. <a href="#/vehicles">Tilbage</a></div>'; setTitle('Køretøj', 'vehicles'); return; }
   setTitle(v.name, 'vehicles');
-  const wide = isWide();
-  let tab = vTab[id] || 'history';
-  if (wide && (tab === 'reminders' || tab === 'docs')) tab = 'history';
-  const km = currentKm(id); const kpd = kmPerDay(id); const y = today().slice(0, 4);
-  const tabs = wide ? [['history', 'Historik'], ['trips', 'Ture'], ['km', 'Kilometer'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter']]
-    : [['history', 'Historik'], ['trips', 'Ture'], ['reminders', 'Vedligehold'], ['km', 'Km'], ['tires', 'Dæk'], ['parts', 'Reservedele'], ['recurring', 'Faste udgifter'], ['docs', 'Dokumenter']];
-  const panel = { history: historyPanel(v), km: kmPanel(v), reminders: remindersPanel(v), docs: docsPanel(v),
-    tires: tiresPanel(v), parts: partsPanel(v), recurring: recurringPanel(v), trips: tripsPanel(v) };
+  let tab = OLD_TAB[vTab[id]] || vTab[id] || 'history';
+  if (!VTABS.some(t => t[0] === tab)) tab = 'history';
+  const km = currentKm(id); const kpd = kmPerDay(id);
+  const top = sortedReminders(id)[0]; const rng = feat('range') ? fuelRange(id) : null;
+  const details = `<div class="muted small">${esc([v.make, v.model, v.year, v.fuel].filter(Boolean).join(' · '))}${v.plate ? ' · <b>' + esc(v.plate) + '</b>' : ''}</div>
+    <p class="small" style="margin:6px 0 0">${kpd ? `Kører ca. <b>${fmtNum(kpd * 365)} km/år</b>` : 'Registrér km jævnligt for at beregne forventet kørsel'}${lastKmDate(id) ? ` · km-stand pr. ${fmtDate(lastKmDate(id))}` : ''}</p>
+    ${v.vin ? `<p class="muted small" style="margin:6px 0 0">VIN: ${esc(v.vin)}</p>` : ''}
+    ${v.notes ? `<p class="small" style="margin:6px 0 0;white-space:pre-wrap">${esc(v.notes)}</p>` : ''}`;
+  const panels = { history: () => historyPanel(v), maint: () => maintPanel(v), econ: () => econPanel(v), docs: () => docsPanel(v) };
   view().innerHTML = `
-    <div class="card">
-      <div class="row between"><div><div class="muted small">${esc([v.make, v.model, v.year, v.fuel].filter(Boolean).join(' · '))}${v.plate ? ' · <b>' + esc(v.plate) + '</b>' : ''}</div>
-        <div class="big-km">${fmtKm(km)}</div><div class="muted small">${kpd ? `ca. ${fmtNum(kpd * 365)} km/år` : 'Registrér km jævnligt for at beregne forventet kørsel'}</div>${rangeLine(id)}</div>
-        <div class="row no-print"><button class="btn" data-act="addReading" data-id="${id}">🔢 Km</button><button class="btn primary" data-act="addEntry" data-id="${id}">🧾 Registrér</button><button class="btn" data-act="editVehicle" data-id="${id}" aria-label="Rediger">✏️</button></div></div>
-      <div class="kpis" style="margin-top:12px">
-        <div class="kpi"><div class="l">Udgifter i år</div><div class="v">${fmtKr(yearCost(id, y))}</div></div>
-        <div class="kpi"><div class="l">Udgifter i alt</div><div class="v">${fmtKr(yearCost(id, ''))}</div></div>
-        ${(() => { const a = avgKml(id); const segs = fuelSegs().byVehicle[id] || []; const last = segs[segs.length - 1];
-          return a ? `<div class="kpi"><div class="l">Gns. forbrug (${a.n} tankn.)</div><div class="v">${fmtDec(a.kml)} ${fuelUnit(id)}</div>${last ? `<div class="l">Seneste: ${fmtDec(last.kml)} ${fuelUnit(id)}</div>` : ''}</div>`
-            : `<div class="kpi"><div class="l">Registreringer</div><div class="v">${live('entries').filter(e => e.vehicleId === id).length}</div></div>`; })()}
+    <div class="card vhead">
+      <div class="big3">
+        <div><div class="l">Km-stand</div><div class="v">${fmtKm(km)}</div></div>
+        <div><div class="l">Næste vedligehold</div>${top ? `<div class="v v-sm"><span class="tl tl-${top.s.level}"></span> ${esc(top.r.name)}</div><div class="l">${remText(top.s).split(' · ')[0] || LEVEL_TXT[top.s.level]}</div>`
+          : '<div class="v v-sm muted">Intet oprettet</div>'}</div>
+        ${rng ? `<div><div class="l">Rækkevidde</div><div class="v"><span class="tl tl-${rng.level}"></span> ca. ${fmtNum(Math.round(rng.range / 5) * 5)} km</div></div>` : ''}
       </div>
-      ${v.notes ? `<p class="small" style="margin:10px 0 0;white-space:pre-wrap">${esc(v.notes)}</p>` : ''}
-      ${v.vin ? `<p class="muted small" style="margin:6px 0 0">VIN: ${esc(v.vin)}</p>` : ''}
+      <div class="row no-print" style="margin-top:12px"><button class="btn" data-act="addReading" data-id="${id}">🔢 Km-stand</button><button class="btn primary" data-act="addEntry" data-id="${id}">🧾 Udgift</button><button class="btn" data-act="editVehicle" data-id="${id}">✏️ Rediger</button></div>
+      ${fold('v-details', 'Vis detaljer', details, false)}
     </div>
-    ${economyCard(v)}
-    <div class="${wide ? 'two-col' : ''}"><div>
-      <div class="tabs">${tabs.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-act="tab" data-id="${id}" data-tab="${k}">${l}</button>`).join('')}</div>
-      <div id="vpanel">${panel[tab]}</div>
-    </div>${wide ? `<div><h2>Vedligehold</h2>${panel.reminders}<h2>Dokumenter og manualer</h2>${panel.docs}</div>` : ''}</div>`;
-  const s = $('#hsearch'); if (s) { s.oninput = () => { vSearch[id] = s.value; $('#hlist').innerHTML = historyList(v); }; }
-  if (tab === 'trips' && IS_NATIVE) renderAutoLog(v);
+    <div class="tabs tabs-4">${VTABS.map(([k, l]) => `<button class="${k === tab ? 'on' : ''}" data-act="tab" data-id="${id}" data-tab="${k}">${l}</button>`).join('')}</div>
+    <div id="vpanel">${panels[tab]()}</div>`;
+  const s = $('#hsearch'); if (s) { s.oninput = () => { vSearch[id] = s.value; $('#hlist').innerHTML = timelineList(v); }; }
+  if (tab === 'history' && (vFilt[id] || 'all') === 'trips' && IS_NATIVE) renderAutoLog(v);
   const ps = $('#psearch'); if (ps) { ps.oninput = () => { pSearch[id] = ps.value; $('#plist').innerHTML = partsList(v); }; }
 }
-function historyList(v) {
-  const q = (vSearch[v.id] || '').toLowerCase();
-  const es = live('entries').filter(e => e.vehicleId === v.id)
-    .filter(e => !q || [entryTitle(e), e.notes, e.workshop, TYPES[e.type]?.label].join(' ').toLowerCase().includes(q))
-    .sort((a, b) => b.date.localeCompare(a.date) || (b.km || 0) - (a.km || 0));
-  if (!es.length) return `<p class="muted">${q ? 'Intet matcher søgningen.' : 'Ingen registreringer endnu. Tryk “Registrér” for at tilføje service, reparationer eller udgifter.'}</p>`;
+// Historik: udgifter, manuelle km-aflæsninger og ture i én tidslinje
+function timelineList(v) {
+  const q = (vSearch[v.id] || '').toLowerCase(); const f = vFilt[v.id] || 'all';
+  const items = [];
+  if (f === 'all' || f === 'entries') for (const e of live('entries').filter(e => e.vehicleId === v.id))
+    if (!q || [entryTitle(e), e.notes, e.workshop, TYPES[e.type]?.label].join(' ').toLowerCase().includes(q)) items.push({ date: e.date, k: (e.km || 0), html: entryItem(e, false), cost: e.cost || 0 });
+  if (f === 'all') {
+    for (const r of live('readings').filter(r => r.vehicleId === v.id && !r.auto))
+      if (!q || 'kilometerstand km-stand'.includes(q)) items.push({ date: r.date, k: r.km, html: `<div class="item small-item" data-act="editReading" data-id="${r.id}"><div class="ic">🔢</div><div class="body"><div class="t">Km-stand ${fmtKm(r.km)}</div><div class="s">${fmtDate(r.date)}</div></div></div>`, cost: 0 });
+    for (const t of live('trips').filter(t => t.vehicleId === v.id))
+      if (!q || [t.title, t.notes, 'tur'].join(' ').toLowerCase().includes(q)) items.push({ date: t.date, k: (t.startTs || 0) / 1e9, html: tripItem(t), cost: 0 });
+  }
+  items.sort((a, b) => b.date.localeCompare(a.date) || b.k - a.k);
+  if (!items.length) return `<p class="muted">${q ? 'Intet matcher søgningen.' : 'Ingenting endnu. Tryk “🧾 Udgift” for at registrere service, reparationer eller udgifter.'}</p>`;
   let out = '', year = null;
-  for (const e of es) {
-    const y = e.date.slice(0, 4);
-    if (y !== year) { year = y; out += `<div class="year-h"><span>${y}</span><span>${fmtKr(es.filter(x => x.date.startsWith(y)).reduce((a, x) => a + (x.cost || 0), 0))}</span></div>`; }
-    out += entryItem(e, false);
+  for (const it of items) {
+    const y = it.date.slice(0, 4);
+    if (y !== year) { year = y; const c = items.filter(x => x.date.startsWith(y)).reduce((a, x) => a + x.cost, 0); out += `<div class="year-h"><span>${y}</span><span>${c ? fmtKr(c) : ''}</span></div>`; }
+    out += it.html;
   }
   return `<div class="list">${out}</div>`;
 }
 function historyPanel(v) {
-  return `<input id="hsearch" type="search" placeholder="Søg i historik …" value="${esc(vSearch[v.id] || '')}" style="margin-bottom:10px"><div id="hlist">${historyList(v)}</div>`;
+  const f = vFilt[v.id] || 'all'; const hasTrips = IS_NATIVE || live('trips').some(t => t.vehicleId === v.id);
+  const chips = [['all', 'Alt'], ['entries', '🧾 Udgifter'], ...(hasTrips ? [['trips', '🛣️ Ture']] : [])];
+  return `<div class="chips" style="margin-bottom:10px">${chips.map(([k, l]) => `<button class="chip ${k === f ? 'on' : ''}" data-act="hFilt" data-id="${v.id}" data-f="${k}">${l}</button>`).join('')}</div>
+    ${f === 'trips' ? tripsPanel(v) : `<input id="hsearch" type="search" placeholder="Søg …" value="${esc(vSearch[v.id] || '')}" style="margin-bottom:10px"><div id="hlist">${timelineList(v)}</div>`}`;
 }
-function kmPanel(v) {
-  const rs = live('readings').filter(r => r.vehicleId === v.id).sort((a, b) => b.date.localeCompare(a.date) || b.km - a.km);
-  const pts = kmPoints(v.id);
-  return `${pts.length >= 2 ? `<div class="card chart" style="margin-bottom:12px">${lineChart(pts)}</div>` : ''}
-    <div class="row" style="margin-bottom:10px"><button class="btn" data-act="addReading" data-id="${v.id}">＋ Registrér kilometerstand</button></div>
-    <div class="list">${rs.length ? rs.map(r => `<div class="item" data-act="editReading" data-id="${r.id}"><div class="ic">🔢</div>
-      <div class="body"><div class="t">${fmtKm(r.km)}</div><div class="s">${fmtDate(r.date)}</div></div></div>`).join('') : '<p class="muted">Ingen kilometeraflæsninger endnu. Kilometerstand fra registreringer tæller også med.</p>'}</div>`;
+function maintPanel(v) {
+  const rs = sortedReminders(v.id); const tires = currentTires(v.id); const parts = live('parts').filter(p => p.vehicleId === v.id);
+  return fold('m-rem', '🔧 Påmindelser', remindersPanel(v), true, rs.length ? String(rs.length) : '')
+    + (feat('tires') ? fold('m-tires', '🛞 Dæk', tiresPanel(v), true, tires.length ? `${tires.length} på` : '') : '')
+    + (feat('parts') ? fold('m-parts', '🔩 Reservedele', partsPanel(v), false, parts.length ? String(parts.length) : '') : '');
+}
+function econPanel(v) {
+  const id = v.id; const y = today().slice(0, 4); const a = avgKml(id); const segs = fuelSegs().byVehicle[id] || []; const last = segs[segs.length - 1];
+  const recs = live('recurring').filter(r => r.vehicleId === id);
+  return `<div class="kpis">
+      <div class="kpi"><div class="l">Udgifter i år</div><div class="v">${fmtKr(yearCost(id, y))}</div></div>
+      <div class="kpi"><div class="l">Udgifter i alt</div><div class="v">${fmtKr(yearCost(id, ''))}</div></div>
+      ${a ? `<div class="kpi"><div class="l">Gns. forbrug (${a.n} tankn.)</div><div class="v">${fmtDec(a.kml)} ${fuelUnit(id)}</div>${last ? `<div class="l">Seneste: ${fmtDec(last.kml)} ${fuelUnit(id)}</div>` : ''}</div>` : ''}
+    </div>
+    ${economyCard(v)}
+    ${feat('recurring') ? fold('e-rec', '📅 Faste udgifter', recurringPanel(v), true, recs.length ? String(recs.length) : '') : ''}
+    ${segs.length ? fold('e-fuel', '⛽ Brændstofforbrug', fuelTable(id, '0000', '9999'), false) : ''}
+    ${feat('seasons') ? (st => st ? fold('e-season', '📆 Sæsoner', st, false) : '')(seasonTable(id)) : ''}`;
 }
 function remindersPanel(v) {
   const rs = sortedReminders(v.id);
@@ -1048,7 +1083,7 @@ function docsPanel(v) {
   const fs = filesOf('vehicle', v.id);
   return `<div class="list">${fs.map(f => `<div class="item" data-act="openFile" data-id="${f.id}"><div class="ic">${fileIcon(f)}</div>
     <div class="body"><div class="t">${esc(f.label || f.name)}</div><div class="s">${esc(f.name)} · ${fmtSize(f.size)}${f.driveId ? '' : ' · venter på upload'}</div></div>
-    <button class="btn sm danger" data-act="deleteDoc" data-id="${f.id}" aria-label="Slet">🗑</button></div>`).join('') || '<p class="muted small">Gem f.eks. instruktionsbog, servicemanual eller registreringsattest her.</p>'}</div>
+    <button class="btn sm danger" data-act="deleteDoc" data-id="${f.id}" >🗑 Slet</button></div>`).join('') || '<p class="muted small">Gem f.eks. instruktionsbog, servicemanual eller registreringsattest her.</p>'}</div>
     <div class="row" style="margin-top:10px"><button class="btn" data-act="addDoc" data-id="${v.id}">＋ Tilføj dokument</button></div>`;
 }
 
@@ -1136,37 +1171,35 @@ function renderReports() {
         <div class="f"><label class="lbl">Periode</label><select id="rPer">${periods.map(([k, l]) => `<option value="${k}" ${k === rf.period ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         ${rf.period === 'custom' ? `<div class="f"><label class="lbl">Fra</label><input type="date" id="rFrom" value="${rf.from}"></div><div class="f"><label class="lbl">Til</label><input type="date" id="rTo" value="${rf.to}"></div>` : ''}
       </div>
-      <div class="lbl" style="margin-bottom:6px">Kategorier</div>
+      ${fold('r-filter', 'Kategorier, søgning og eksport', `      <div class="lbl" style="margin-bottom:6px">Kategorier</div>
       <div class="chips">${Object.entries(TYPES).map(([k, t]) => `<button class="chip ${rf.cats.has(k) ? 'on' : ''}" data-act="rCat" data-id="${k}">${t.icon} ${t.label}</button>`).join('')}
         <button class="chip" data-act="rCatAll">Alle / ingen</button></div>
       <div class="row" style="margin-top:12px"><input id="rQ" type="search" placeholder="Søg (f.eks. bremser, værkstedsnavn)" value="${esc(rf.q)}" class="grow" style="flex:1;min-width:180px">
-        <button class="btn" data-act="exportCsv">⤓ CSV (Excel)</button><button class="btn" data-act="print">🖨️ Udskriv / PDF</button></div>
+        <button class="btn" data-act="exportCsv">⤓ CSV (Excel)</button><button class="btn" data-act="print">🖨️ Udskriv / PDF</button></div>`, false, rf.cats.size < Object.keys(TYPES).length || rf.q ? 'filter aktivt' : '')}
     </div>
     <div class="print-only"><h2>${esc(rf.vehicle ? vehicleName(rf.vehicle) : 'Alle køretøjer')} · ${fmtDate(from)} – ${fmtDate(to)}</h2></div>
-    <h2>Nøgletal <span class="muted small">(${fmtDate(from)} – ${fmtDate(to)})</span></h2>
-    <div class="kpis">
-      <div class="kpi"><div class="l">Udgifter i alt</div><div class="v">${fmtKr(total)}</div></div>
-      <div class="kpi"><div class="l">Pr. måned</div><div class="v">${fmtKr(total / months)}</div></div>
+    <h2>${rf.period === 'thisYear' ? 'Året kort fortalt' : 'Kort fortalt'} <span class="muted small">(${fmtDate(from)} – ${fmtDate(to)})</span></h2>
+    <div class="kpis kpis-4">
+      <div class="kpi"><div class="l">Udgifter i alt</div><div class="v">${fmtKr(total)}</div><div class="l">${fmtKr(total / months)} pr. måned</div></div>
       <div class="kpi"><div class="l">Kørt</div><div class="v">${fmtKm(km)}</div></div>
-      <div class="kpi"><div class="l">Pr. km</div><div class="v">${km ? fmtKr2(total / km) : '–'}</div></div>
       ${(() => { let km = 0, l = 0; for (const v of vids) { const a = avgKml(v, from, to); if (a) { km += a.km; l += a.liters; } }
-        return l ? `<div class="kpi"><div class="l">Gns. forbrug</div><div class="v">${fmtDec(km / l)} ${rf.vehicle ? fuelUnit(rf.vehicle) : 'km/l'}</div></div>` : ''; })()}
-      <div class="kpi"><div class="l">Registreringer</div><div class="v">${es.length}</div></div>
+        return `<div class="kpi"><div class="l">Gns. forbrug</div><div class="v">${l ? fmtDec(km / l) + ' ' + (rf.vehicle ? fuelUnit(rf.vehicle) : 'km/l') : '–'}</div></div>`; })()}
+      <div class="kpi"><div class="l">Pris pr. km</div><div class="v">${km ? fmtKr2(total / km) : '–'}</div></div>
     </div>
-    ${total ? `<div class="two-col" style="margin-top:4px"><div><h2>Udgifter pr. ${byMonth ? 'måned' : 'år'}</h2><div class="card chart">${barChart(buckets, cats)}</div></div>
-    <div><h2>Fordeling</h2><div class="card">${cats.sort((a, b) => byCat[b] - byCat[a]).map(c => `<div class="hbar"><span>${TYPES[c].icon} ${TYPES[c].label}</span>
-      <span class="track"><i style="width:${byCat[c] / catMax * 100}%;background:${TYPES[c].color}"></i></span><span class="nowrap"><b>${fmtKr(byCat[c])}</b> <span class="muted small">${Math.round(byCat[c] / total * 100)}%</span></span></div>`).join('')}</div>
-      ${!rf.vehicle && live('vehicles').length > 1 ? `<h2>Pr. køretøj</h2><div class="card"><table class="t"><tr><th>Køretøj</th><th class="n">Kørt</th><th class="n">Udgifter</th><th class="n">Pr. km</th></tr>
-      ${live('vehicles').map(v => { const k = kmDriven(v.id, from, to); const c = byVeh[v.id] || 0; return `<tr><td>${esc(v.name)}</td><td class="n">${fmtKm(k)}</td><td class="n">${fmtKr(c)}</td><td class="n">${k ? fmtKr2(c / k) : '–'}</td></tr>`; }).join('')}</table></div>` : ''}
-    </div></div>` : ''}
-    <h2>Historik (${es.length})</h2>
-    <div class="card scroll-x"><table class="t"><tr><th>Dato</th>${rf.vehicle ? '' : '<th>Køretøj</th>'}<th>Kategori</th><th>Beskrivelse</th><th class="n">Km</th><th class="n">Beløb</th></tr>
+    ${total ? fold('r-month', `📊 Udgifter pr. ${byMonth ? 'måned' : 'år'}`, `<div class="card chart">${barChart(buckets, cats)}</div>`) : ''}
+    ${total ? fold('r-dist', '🥧 Fordeling på kategorier', `<div class="card">${cats.sort((a, b) => byCat[b] - byCat[a]).map(c => `<div class="hbar"><span>${TYPES[c].icon} ${TYPES[c].label}</span>
+      <span class="track"><i style="width:${byCat[c] / catMax * 100}%;background:${TYPES[c].color}"></i></span><span class="nowrap"><b>${fmtKr(byCat[c])}</b> <span class="muted small">${Math.round(byCat[c] / total * 100)}%</span></span></div>`).join('')}</div>`, false, cats.length + ' kategorier') : ''}
+    ${total && !rf.vehicle && live('vehicles').length > 1 ? fold('r-veh', '🚗 Pr. køretøj', `<div class="card"><table class="t"><tr><th>Køretøj</th><th class="n">Kørt</th><th class="n">Udgifter</th><th class="n">Pr. km</th></tr>
+      ${live('vehicles').map(v => { const k = kmDriven(v.id, from, to); const c = byVeh[v.id] || 0; return `<tr><td>${esc(v.name)}</td><td class="n">${fmtKm(k)}</td><td class="n">${fmtKr(c)}</td><td class="n">${k ? fmtKr2(c / k) : '–'}</td></tr>`; }).join('')}</table></div>`) : ''}
+    ${fold('r-list', '🧾 Alle udgifter', `<div class="card scroll-x"><table class="t"><tr><th>Dato</th>${rf.vehicle ? '' : '<th>Køretøj</th>'}<th>Kategori</th><th>Beskrivelse</th><th class="n">Km</th><th class="n">Beløb</th></tr>
       ${es.map(e => `<tr data-act="viewEntry" data-id="${e.id}" style="cursor:pointer"><td class="nowrap">${fmtDate(e.date)}</td>${rf.vehicle ? '' : `<td>${esc(vehicleName(e.vehicleId))}</td>`}
         <td class="nowrap">${TYPES[e.type]?.icon || ''} ${TYPES[e.type]?.label || ''}</td><td>${esc(entryTitle(e))}${filesOf('entry', e.id).length ? ' 📎' : ''}</td>
-        <td class="n">${e.km != null ? fmtNum(e.km) : ''}</td><td class="n">${e.cost != null ? fmtKr2(e.cost) : ''}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">Ingen registreringer i perioden.</td></tr>`}
-      ${es.length ? `<tr><td colspan="${rf.vehicle ? 4 : 5}"><b>I alt</b></td><td class="n"><b>${fmtKr2(total)}</b></td></tr>` : ''}</table></div>
-    ${rf.vehicle ? seasonTable(rf.vehicle) + fuelTable(rf.vehicle, from, to) + serviceSummary(rf.vehicle) : ''}
-    ${workReport()}`;
+        <td class="n">${e.km != null ? fmtNum(e.km) : ''}</td><td class="n">${e.cost != null ? fmtKr2(e.cost) : ''}</td></tr>`).join('') || `<tr><td colspan="6" class="muted">Ingen udgifter i perioden.</td></tr>`}
+      ${es.length ? `<tr><td colspan="${rf.vehicle ? 4 : 5}"><b>I alt</b></td><td class="n"><b>${fmtKr2(total)}</b></td></tr>` : ''}</table></div>`, false, `${es.length} · ${fmtKr(total)}`)}
+    ${rf.vehicle ? (() => { const st = feat('seasons') ? seasonTable(rf.vehicle) : ''; const ft = fuelTable(rf.vehicle, from, to); const ss = serviceSummary(rf.vehicle);
+      return (st ? fold('r-season', '📆 Sæsoner', st) : '') + (ft ? fold('r-fuel', '⛽ Brændstofforbrug', ft) : '') + (ss ? fold('r-service', '🔧 Vedligeholdsstatus', ss) : ''); })()
+      : '<p class="muted small" style="margin-top:14px">Vælg et køretøj øverst for at se sæsoner, brændstofforbrug og vedligeholdsstatus.</p>'}
+    ${feat('work') ? workReport() : ''}`;
   $('#rVeh').onchange = e => { rf.vehicle = e.target.value; render(); };
   $('#rPer').onchange = e => { rf.period = e.target.value; render(); };
   $('#rFrom') && ($('#rFrom').onchange = e => { rf.from = e.target.value; render(); });
@@ -1178,7 +1211,7 @@ function fuelTable(vid, from, to) {
   if (!segs.length) return '';
   const u = fuelUnit(vid), vu = volUnit(vid);
   const pts = segs.map(s => ({ date: s.date, km: s.kml }));
-  return `<h2>Brændstofforbrug</h2><div class="two-col">
+  return `<div class="two-col">
     <div>${segs.length >= 2 ? `<div class="card chart">${kmlChart(pts, u)}</div>` : ''}</div>
     <div class="card scroll-x"><table class="t"><tr><th>Dato</th><th class="n">Kørt</th><th class="n">${vu === 'l' ? 'Liter' : 'kWh'}</th><th class="n">Pris pr. ${vu}</th><th class="n">${u}</th></tr>
     ${segs.slice().reverse().map(s => { const e = byId('entries', s.entryId); return `<tr data-act="viewEntry" data-id="${s.entryId}" style="cursor:pointer"><td class="nowrap">${fmtDate(s.date)}</td>
@@ -1199,7 +1232,7 @@ function kmlChart(pts, unit) {
 }
 function serviceSummary(vid) {
   const rs = sortedReminders(vid); if (!rs.length) return '';
-  return `<h2>Vedligeholdsstatus</h2><div class="card scroll-x"><table class="t"><tr><th>Punkt</th><th>Interval</th><th>Sidst udført</th><th>Næste</th><th>Status</th></tr>
+  return `<div class="card scroll-x"><table class="t"><tr><th>Punkt</th><th>Interval</th><th>Sidst udført</th><th>Næste</th><th>Status</th></tr>
     ${rs.map(({ r, s }) => `<tr><td>${esc(r.name)}</td><td class="nowrap">${[r.intervalKm ? fmtKm(r.intervalKm) : '', r.intervalMonths ? r.intervalMonths + ' mdr.' : ''].filter(Boolean).join(' / ')}</td>
       <td class="nowrap">${s.lastDate ? fmtDate(s.lastDate) : '–'}${s.lastKm != null ? ' · ' + fmtKm(s.lastKm) : ''}</td>
       <td class="nowrap">${[s.nextKm != null ? fmtKm(s.nextKm) : '', s.nextDate ? fmtDate(s.nextDate) : ''].filter(Boolean).join(' / ')}</td>
@@ -1222,16 +1255,11 @@ function renderSettings() {
   const en = Drive.enabled(); const last = localStorage.getItem('lastSync');
   const pendingUp = live('files').filter(f => !f.driveId).length;
   view().innerHTML = `
-    <div class="card"><h3>☁️ Google Drive</h3>
-      <p class="muted small">Alle data og bilag gemmes i mappen <b>${ROOT_FOLDER}</b> på dit Google Drive, så tablet og telefon altid er synkroniseret. Appen kan kun se de filer, den selv har oprettet.</p>
-      ${IS_NATIVE ? '' : `<div class="f"><label class="lbl">Google OAuth Client ID</label><input id="cid" value="${esc(Drive.clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></div>`}
-      ${en ? `<p>Status: <b>${{ ok: 'Synkroniseret', syncing: 'Synkroniserer…', auth: 'Login udløbet', error: 'Fejl', local: '' }[Sync.state]}</b>${last ? ` · sidst ${new Date(last).toLocaleString('da-DK')}` : ''}
-        ${Sync.err ? `<br><span class="small" style="color:var(--bad)">${esc(Sync.err)}</span>` : ''}${pendingUp ? `<br><span class="small muted">${pendingUp} fil(er) venter på upload</span>` : ''}</p>
-        <div class="row"><button class="btn primary" data-act="syncNow">⟳ Synkronisér nu</button>${Sync.state === 'auth' ? '<button class="btn" data-act="connect">Log ind igen</button>' : ''}
-        ${Drive.ids.root ? `<a class="btn" href="https://drive.google.com/drive/folders/${Drive.ids.root}" target="_blank" rel="noopener">Åbn mappe i Drive</a>` : ''}
-        <button class="btn danger" data-act="disconnect">Afbryd</button></div>`
-      : `<button class="btn primary" data-act="connect">Forbind Google Drive</button>`}
-    </div>
+    <h2 style="margin-top:0">Daglig brug</h2>
+    <div class="card"><h3>🎨 Tema</h3>
+      <div class="chips" style="margin-top:8px">${[['auto', '⚙️ Følg enheden'], ['light', '☀️ Lyst'], ['dark', '🌙 Mørkt']].map(([k, l]) =>
+        `<button class="chip ${(localStorage.getItem('theme') || 'auto') === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div>
+      <p class="muted small" style="margin:8px 0 0">Gælder for denne enhed. Du kan også skifte hurtigt med ☀️/🌙-knappen øverst.</p></div>
     ${IS_NATIVE ? `<div class="card" style="margin-top:14px"><h3>🚘 Android Auto</h3>
       <p class="muted small">Køreskærmen viser hastighed, hastighedsgrænse, tur, kilometerstand og rækkevidde for det køretøj, telefonen er forbundet til.</p>
       <div class="fgrid">
@@ -1248,13 +1276,23 @@ function renderSettings() {
         <li>Åbn Android Auto-indstillingerne på telefonen (Indstillinger → søg “Android Auto”).</li>
         <li>Rul ned og tryk 10 gange på <b>Version</b>, og godkend udviklertilstand.</li>
         <li>Tryk ⋮ øverst → <b>Udviklerindstillinger</b> → slå <b>Ukendte kilder</b> til.</li>
-        <li>Under <b>Tilpas startprogram</b> kan du sætte Køretøjslog på listen.</li>
-        <li>Forbind til skærmen, og vælg Køretøjslog i app-oversigten.</li></ol></details></div>` : ''}
-    ${workCard()}
-    <div class="card" style="margin-top:14px"><h3>🎨 Tema</h3>
-      <div class="chips" style="margin-top:8px">${[['auto', '⚙️ Følg enheden'], ['light', '☀️ Lyst'], ['dark', '🌙 Mørkt']].map(([k, l]) =>
-        `<button class="chip ${(localStorage.getItem('theme') || 'auto') === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div>
-      <p class="muted small" style="margin:8px 0 0">Gælder for denne enhed. Du kan også skifte hurtigt med ☀️/🌙-knappen øverst.</p></div>
+        <li>Under <b>Tilpas startprogram</b> kan du sætte Motorist på listen.</li>
+        <li>Forbind til skærmen, og vælg Motorist i app-oversigten.</li></ol></details></div>` : ''}
+    <div class="card" style="margin-top:14px"><h3>🧩 Funktioner</h3>
+      <p class="muted small" style="margin-top:0">Slå det fra, du ikke bruger – så forsvinder det fra faner og menuer. Dine data bliver liggende.</p>
+      ${FEATURES.map(([k, l]) => `<label class="check"><input type="checkbox" class="featChk" data-id="${k}" ${feat(k) ? 'checked' : ''}> ${l}</label>`).join('')}
+    </div>
+    ${fold('s-setup', '⚙️ Opsætning', `<div class="card" style="margin-top:14px"><h3>☁️ Google Drive</h3>
+      <p class="muted small">Alle data og bilag gemmes i mappen <b>${ROOT_FOLDER}</b> på dit Google Drive, så tablet og telefon altid er synkroniseret. Appen kan kun se de filer, den selv har oprettet.</p>
+      ${IS_NATIVE ? '' : `<div class="f"><label class="lbl">Google OAuth Client ID</label><input id="cid" value="${esc(Drive.clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></div>`}
+      ${en ? `<p>Status: <b>${{ ok: 'Synkroniseret', syncing: 'Synkroniserer…', auth: 'Login udløbet', error: 'Fejl', local: '' }[Sync.state]}</b>${last ? ` · sidst ${new Date(last).toLocaleString('da-DK')}` : ''}
+        ${Sync.err ? `<br><span class="small" style="color:var(--bad)">${esc(Sync.err)}</span>` : ''}${pendingUp ? `<br><span class="small muted">${pendingUp} fil(er) venter på upload</span>` : ''}</p>
+        <div class="row"><button class="btn primary" data-act="syncNow">⟳ Synkronisér nu</button>${Sync.state === 'auth' ? '<button class="btn" data-act="connect">Log ind igen</button>' : ''}
+        ${Drive.ids.root ? `<a class="btn" href="https://drive.google.com/drive/folders/${Drive.ids.root}" target="_blank" rel="noopener">Åbn mappe i Drive</a>` : ''}
+        <button class="btn danger" data-act="disconnect">Afbryd</button></div>`
+      : `<button class="btn primary" data-act="connect">Forbind Google Drive</button>`}
+    </div>
+    ${feat('work') ? workCard() : ''}
     <div class="card" style="margin-top:14px"><h3>💾 Backup</h3>
       <p class="muted small">Eksportér alle registreringer som en JSON-fil (uden bilag), eller importér en tidligere backup. Import fletter med eksisterende data.</p>
       <div class="row"><button class="btn" data-act="exportJson">⤓ Eksportér data</button><label class="btn">⤒ Importér<input type="file" accept="application/json,.json" hidden id="imp"></label></div>
@@ -1263,7 +1301,8 @@ function renderSettings() {
       ${IS_NATIVE ? `<p class="muted small">Du bruger Android-appen. Nye versioner hentes fra <a href="https://github.com/peterelkjaer/koretojslog/releases/latest" target="_blank" rel="noopener">GitHub (seneste version)</a> og installeres oven på den gamle – dine data bevares.</p>`
         : `<p class="muted small">Åbn appens adresse i Chrome, tryk på ⋮-menuen og vælg <b>Installér app</b> / <b>Føj til startskærm</b>. Gør det samme på telefonen, og forbind til samme Google-konto.</p>`}
       <p class="muted small">Version ${APP_VERSION}${IS_NATIVE ? ' · Android-app' : ''}</p>
-    </div>`;
+    </div>`, false, Drive.enabled() ? 'Google Drive forbundet' : 'Google Drive ikke forbundet')}`;
+  $$('.featChk').forEach(c => c.onchange = () => { const st = featState(); st[c.dataset.id] = c.checked; localStorage.setItem('features', JSON.stringify(st)); pushCarData(); toast(c.checked ? 'Slået til' : 'Slået fra'); });
   for (const k of ['aaWarnKm', 'aaWarnDays']) if ($('#' + k)) $('#' + k).onchange = e => { localStorage.setItem(k, String(Math.max(0, num(e.target.value) || 0))); pushCarData(); toast('Gemt'); };
   for (const k of ['aaSpeedLimit', 'aaSndOver', 'aaSndAhead', 'aaSndService']) if ($('#' + k)) $('#' + k).onchange = e => { localStorage.setItem(k, e.target.checked ? '1' : '0'); pushCarData(); };
   if (IS_NATIVE && NH && NH.speedCache) Promise.resolve(NH.speedCache({})).then(r => { const el = $('#speedCache'); if (el && r && r.tiles) el.innerHTML = ` Gemt: ${r.tiles} område${r.tiles > 1 ? 'r' : ''} (${fmtDec(r.bytes / 1048576, 1)} MB). <a href="#" data-act="clearSpeedCache">Ryd</a>`; }).catch(() => {});
@@ -1475,7 +1514,7 @@ function fuelRange(vid) {
   return { range, kml, since, level: range < 50 ? 'overdue' : range < 100 ? 'soon' : 'ok', asOf: lastKmDate(vid) };
 }
 function rangeLine(vid) {
-  const r = fuelRange(vid); if (!r) return '';
+  const r = feat('range') ? fuelRange(vid) : null; if (!r) return '';
   return `<div class="small" style="margin-top:6px">⛽ <span class="badge b-${r.level}">ca. ${fmtNum(Math.round(r.range / 5) * 5)} km til tom</span> <span class="muted">${fmtKm(r.since)} siden fuld tank</span></div>`;
 }
 
@@ -1496,12 +1535,11 @@ function seasonTable(vid) {
     rows.push({ label: sm === 1 ? String(y) : `${y}/${String(y + 1).slice(2)}`, cost, km, trips: trips.length, longest, fuel, current: to >= t });
   }
   const hasTrips = rows.some(r => r.trips);
-  return `<h2>Sæsoner <span class="muted small">(sæsonen starter i ${MONTHS[sm - 1]})</span></h2>
-    <div class="card scroll-x"><table class="t"><tr><th>Sæson</th><th class="n">Kørt</th>${hasTrips ? '<th class="n">Ture</th><th class="n">Længste</th>' : ''}<th class="n">Forbrug</th><th class="n">Udgifter</th><th class="n">Pr. km</th></tr>
+  return `<div class="card scroll-x"><table class="t"><tr><th>Sæson</th><th class="n">Kørt</th>${hasTrips ? '<th class="n">Ture</th><th class="n">Længste</th>' : ''}<th class="n">Forbrug</th><th class="n">Udgifter</th><th class="n">Pr. km</th></tr>
     ${rows.reverse().map(r => `<tr><td class="nowrap">${r.label}${r.current ? ' <span class="muted small">(i gang)</span>' : ''}</td><td class="n">${r.km ? fmtKm(r.km) : '–'}</td>
       ${hasTrips ? `<td class="n">${r.trips || ''}</td><td class="n">${r.longest ? fmtKm(r.longest) : ''}</td>` : ''}
       <td class="n">${r.fuel ? fmtDec(r.fuel.kml) + ' ' + fuelUnit(vid) : ''}</td><td class="n">${fmtKr(r.cost)}</td><td class="n">${r.km ? fmtKr2(r.cost / r.km) : '–'}</td></tr>`).join('')}</table></div>
-    <p class="muted small">En sæson regnes fra 1. ${MONTHS[sm - 1]} og 12 måneder frem, så vinterens forsikring og afgifter tæller med. Startmåneden ændres under køretøjet (✏️).</p>`;
+    <p class="muted small">En sæson regnes fra 1. ${MONTHS[sm - 1]} og 12 måneder frem, så vinterens forsikring og afgifter tæller med. Startmåneden ændres under køretøjet (✏️ Rediger).</p>`;
 }
 
 /* ---------- Ture og automatisk km-logning ---------- */
@@ -1594,13 +1632,16 @@ function tripsPanel(v) {
   for (const t of ts) {
     const m = t.date.slice(0, 7);
     if (m !== month) { month = m; out += `<div class="year-h"><span>${fmtMonth(t.date)}</span><span>${fmtKm(Math.round(ts.filter(x => x.date.startsWith(m)).reduce((a, x) => a + x.km, 0)))}</span></div>`; }
-    const avg = tripAvg(t);
-    out += `<div class="item" data-act="viewTrip" data-id="${t.id}"><div class="ic">🛣️</div><div class="body">
-      <div class="t">${esc(t.title || fmtDate(t.date))}${t.work ? ' <span class="badge b-work">Arbejde</span>' : ''}</div>
-      <div class="s">${t.title ? fmtDate(t.date) + ' · ' : ''}${fmtTime(t.startTs)}–${fmtTime(t.endTs)} · ${fmtDur(t.endTs - t.startTs)}${avg ? ` · gns. ${Math.round(avg)} km/t` : ''}</div></div>
-      <div class="amt">${fmtDec(t.km)} km</div></div>`;
+    out += tripItem(t);
   }
   return out;
+}
+function tripItem(t) {
+  const avg = tripAvg(t);
+  return `<div class="item" data-act="viewTrip" data-id="${t.id}"><div class="ic">🛣️</div><div class="body">
+      <div class="t">${esc(t.title || 'Tur ' + fmtDate(t.date))}${t.work && feat('work') ? ' <span class="badge b-work">Arbejde</span>' : ''}</div>
+      <div class="s">${t.title ? fmtDate(t.date) + ' · ' : ''}${fmtTime(t.startTs)}–${fmtTime(t.endTs)} · ${fmtDur(t.endTs - t.startTs)}${avg ? ` · gns. ${Math.round(avg)} km/t` : ''}</div></div>
+      <div class="amt">${fmtDec(t.km)} km</div></div>`;
 }
 
 async function renderAutoLog(v) {
@@ -1723,7 +1764,7 @@ function tripView(id) {
       ${t.maxKmh ? `<div class="kpi"><div class="l">Topfart (GPS)</div><div class="v">${t.maxKmh} km/t</div></div>` : ''}
     </div>
     <form><div class="fgrid">
-      <div class="f full"><label class="check" style="margin:0"><input type="checkbox" name="work" ${t.work ? 'checked' : ''}> 🏢 Arbejde (tæller med i kørselsfradrag)</label></div>
+      ${feat('work') ? `<div class="f full"><label class="check" style="margin:0"><input type="checkbox" name="work" ${t.work ? 'checked' : ''}> 🏢 Arbejde (tæller med i kørselsfradrag)</label></div>` : ''}
       <div class="f full"><label>Titel</label><input name="title" value="${esc(t.title)}" placeholder="F.eks. Tur til Skagen"></div>
       <div class="f full"><label>Noter</label><textarea name="notes">${esc(t.notes)}</textarea></div>
       <div class="f"><label>Distance (km)</label><input name="km" type="number" step="0.1" inputmode="decimal" value="${t.km}"></div>
@@ -1735,7 +1776,7 @@ function tripView(id) {
   drawMap($('#tripMap', m), [decodePoly(t.poly)]).then(map => { m.closest('.modal-bg')._cleanup = () => map.remove(); }).catch(e => { $('#tripMap', m).innerHTML = `<p class="muted small" style="padding:20px">Kortet kunne ikke indlæses (${esc(e.message)}).</p>`; });
   $('form', m).onsubmit = async ev => {
     ev.preventDefault(); const fd = new FormData(ev.target);
-    const work = fd.get('work') === 'on';
+    const work = feat('work') ? fd.get('work') === 'on' : !!t.work;
     const nt = { ...t, title: fd.get('title').trim(), notes: fd.get('notes').trim(), km: num(fd.get('km')) ?? t.km, vehicleId: fd.get('vehicleId'), work, workAuto: work === !!t.work ? t.workAuto : false };
     upsert('trips', nt);
     const r = data.readings.find(x => x.id === 'trip_' + t.id && !x.deleted);
@@ -1857,13 +1898,13 @@ function workReport() {
   const years = [...new Set([cy, ...all.map(t => t.date.slice(0, 4))])].sort().reverse();
   const y = rf.workYear && years.includes(rf.workYear) ? rf.workYear : cy;
   const ms = workMonths(y); const tot = ms.reduce((a, m) => ({ trips: a.trips + m.trips, days: a.days + m.days, km: a.km + m.km }), { trips: 0, days: 0, km: 0 });
-  return `<h2>🏢 Arbejdsture ${y} <span class="muted small">(kørselsfradrag${rf.vehicle ? ' · ' + esc(vehicleName(rf.vehicle)) : ''})</span></h2>
+  return fold('r-work', `🏢 Arbejdsture ${y}`, `<p class="muted small" style="margin-top:0">Til kørselsfradrag${rf.vehicle ? ' · ' + esc(vehicleName(rf.vehicle)) : ''}.</p>
     <div class="row no-print" style="margin-bottom:8px"><div class="chips">${years.map(x => `<button class="chip ${x === y ? 'on' : ''}" data-act="workYear" data-id="${x}">${x}</button>`).join('')}</div>
       <span class="spacer"></span><button class="btn" data-act="exportWorkCsv" data-id="${y}">⤓ CSV</button></div>
     <div class="card scroll-x"><table class="t"><tr><th>Måned</th><th class="n">Ture</th><th class="n">Dage</th><th class="n">Km</th></tr>
       ${ms.map(m => `<tr${m.trips ? '' : ' class="muted"'}><td>${m.name}</td><td class="n">${m.trips}</td><td class="n">${m.days}</td><td class="n">${m.trips ? fmtDec(m.km) : ''}</td></tr>`).join('')}
       <tr><td><b>I alt</b></td><td class="n"><b>${tot.trips}</b></td><td class="n"><b>${tot.days}</b></td><td class="n"><b>${fmtDec(tot.km)}</b></td></tr></table>
-      <p class="muted small" style="margin:8px 0 0">Ture = antal ture markeret Arbejde. Dage = antal forskellige dage med mindst én arbejdstur. ${live('places').length ? '' : '<a href="#/settings">Tilføj din arbejdsplads</a> for automatisk markering.'}</p></div>`;
+      <p class="muted small" style="margin:8px 0 0">Ture = antal ture markeret Arbejde. Dage = antal forskellige dage med mindst én arbejdstur. ${live('places').length ? '' : '<a href="#/settings">Tilføj din arbejdsplads</a> for automatisk markering.'}</p></div>`, false, `${tot.trips} ture`);
 }
 function exportWorkCsv(year) {
   const ms = workMonths(year);
@@ -1890,7 +1931,9 @@ function allTripsMap(vid) {
 
 /* ---------- Handlinger ---------- */
 function doPrint() {
-  if (IS_NATIVE) return NH.print({ name: 'Køretøjslog ' + today() }).catch(e => toast(e.message));
+  printing = true; $$('details.fold').forEach(d => { d.dataset.wasOpen = d.open ? '1' : ''; d.open = true; });
+  setTimeout(() => { $$('details.fold').forEach(d => { d.open = d.dataset.wasOpen === '1'; }); printing = false; }, 1500);
+  if (IS_NATIVE) return NH.print({ name: 'Motorist ' + today() }).catch(e => toast(e.message));
   window.print();
 }
 const ACT = {
@@ -1898,7 +1941,7 @@ const ACT = {
   addVehicle: () => vehicleForm(),
   editVehicle: d => vehicleForm(d.id),
   goVehicle: d => { location.hash = '#/v/' + d.id; },
-  goVehicleTab: d => { vTab[d.id] = d.tab; location.hash = '#/v/' + d.id; },
+  goVehicleTab: d => { vTab[d.id] = OLD_TAB[d.tab] || d.tab; location.hash = '#/v/' + d.id; },
   addEntry: d => entryForm(null, { vehicleId: d.id }),
   viewEntry: d => entryView(d.id),
   addReading: d => readingForm(d.id),
@@ -1910,6 +1953,7 @@ const ACT = {
   openFile: d => openFile(d.id),
   deleteDoc: async d => { const f = byId('files', d.id); if (!confirm(`Slet "${f.label || f.name}"?`)) return; softDelete('files', d.id); await persist(); render(); },
   tab: d => { vTab[d.id] = d.tab; render(); },
+  hFilt: d => { vFilt[d.id] = d.f; render(); },
   rCat: d => { rf.cats.has(d.id) ? rf.cats.delete(d.id) : rf.cats.add(d.id); render(); },
   rCatAll: () => { rf.cats = rf.cats.size === Object.keys(TYPES).length ? new Set() : new Set(Object.keys(TYPES)); render(); },
   exportCsv: () => exportCsv(),
@@ -1932,7 +1976,7 @@ const ACT = {
   syncPill: () => { if (Sync.state === 'auth') connectDrive(); else if (Sync.state === 'local') location.hash = '#/settings'; else Sync.run().then(render); },
   disconnect: () => { if (!confirm('Afbryd forbindelsen til Google Drive? Data bliver liggende både på denne enhed og på Drive.')) return;
     Drive.logout(); localStorage.removeItem('mode'); Drive.ids = {}; Drive.saveIds(); Sync.set('local'); render(); },
-  exportJson: () => download(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), `koretojslog-backup-${today()}.json`),
+  exportJson: () => download(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), `motorist-backup-${today()}.json`),
 };
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
